@@ -25,6 +25,8 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Str
 
 from .config import get_settings
 from .disclaimer import DISCLAIMER
+from .ingest import INGEST_SOURCES
+from .ingest.scheduler import IngestScheduler
 from .llm import ClaudeClient
 from .rag import KnowledgeBase
 from .schemas import (
@@ -61,7 +63,7 @@ def build_qa_service() -> QAService:
     """Build just the Q&A service (used by the CLI and lightweight callers)."""
     settings = get_settings()
     kb = KnowledgeBase.from_sources(
-        settings.sources_dir,
+        settings.source_dirs,  # curated data/sources + auto-ingested dir
         chunk_size_words=settings.chunk_size_words,
         chunk_overlap_words=settings.chunk_overlap_words,
     )
@@ -97,6 +99,8 @@ def build_app_state() -> dict:
             graph_version=settings.whatsapp_graph_version,
         )
 
+    scheduler = IngestScheduler(settings, kb)
+
     return {
         "settings": settings,
         "kb": kb,
@@ -105,6 +109,7 @@ def build_app_state() -> dict:
         "usage": usage,
         "conversation": conversation,
         "whatsapp": whatsapp,
+        "ingest_scheduler": scheduler,
         "seen_message_ids": deque(maxlen=2000),
     }
 
@@ -112,7 +117,13 @@ def build_app_state() -> dict:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _state.update(build_app_state())
+    settings = _state["settings"]
+    scheduler = _state.get("ingest_scheduler")
+    if scheduler and settings.ingest_enabled:
+        scheduler.start()
     yield
+    if scheduler:
+        await scheduler.stop()
     ws = _state.get("whatsapp")
     if ws:
         ws.close()
@@ -349,3 +360,39 @@ def admin_premium(req: PremiumRequest) -> UsageResponse:
     q = usage.check(req.user_id)
     return UsageResponse(user_id=req.user_id, used=q.used, limit=q.limit,
                          remaining=q.remaining, premium=q.premium)
+
+
+# --------------------------------------------------------------------------- #
+# Knowledge-base ingestion (weekly scan) — manual trigger + status
+# --------------------------------------------------------------------------- #
+@app.post("/admin/reindex")
+def admin_reindex() -> dict:
+    """Run the official-source scan now and reload the knowledge base.
+
+    DEMO/admin endpoint — protect it behind auth in production. Runs even when the weekly
+    schedule is disabled, so you can seed/refresh content on demand.
+    """
+    scheduler: IngestScheduler = _svc("ingest_scheduler")
+    report = scheduler.run_sync()
+    return report.to_dict()
+
+
+@app.get("/admin/ingest/status")
+def admin_ingest_status() -> dict:
+    """Return the last scan outcome and the ingestion schedule configuration."""
+    settings = _settings()
+    scheduler: IngestScheduler = _state.get("ingest_scheduler")
+    manifest_path = Path(settings.data_dir) / "ingest_manifest.json"
+    last_run = None
+    if manifest_path.exists():
+        try:
+            last_run = json.loads(manifest_path.read_text(encoding="utf-8")).get("last_run")
+        except (json.JSONDecodeError, OSError):
+            last_run = None
+    return {
+        "enabled": settings.ingest_enabled,
+        "interval_hours": settings.ingest_interval_hours,
+        "on_startup": settings.ingest_on_startup,
+        "sources": len(INGEST_SOURCES),
+        "last_run": last_run or (scheduler.last_report.to_dict() if scheduler and scheduler.last_report else None),
+    }

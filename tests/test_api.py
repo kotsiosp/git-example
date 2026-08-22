@@ -17,6 +17,7 @@ from app.services import (
     QAService,
     UsageService,
 )
+from app.ingest.scheduler import IngestScheduler
 from app.services.conversation import SessionStore
 
 
@@ -37,6 +38,7 @@ def client(monkeypatch, kb, stub_client, settings, store):
     state = {
         "settings": settings, "kb": kb, "qa": qa, "store": store, "usage": usage,
         "conversation": conversation, "whatsapp": None,
+        "ingest_scheduler": IngestScheduler(settings, kb),
         "seen_message_ids": deque(maxlen=2000),
     }
     monkeypatch.setattr(main, "build_app_state", lambda: state)
@@ -112,6 +114,30 @@ def test_admin_premium(client):
     body = client.post("/admin/premium", json={"user_id": "vip", "premium": True}).json()
     assert body["premium"] is True
     assert body["remaining"] == -1
+
+
+def test_ingest_status_endpoint(client):
+    body = client.get("/admin/ingest/status").json()
+    assert body["enabled"] is False        # opt-in; off by default in tests
+    assert body["interval_hours"] == 168   # weekly
+    assert body["sources"] >= 1
+
+
+def test_reindex_endpoint(client, monkeypatch):
+    # Stub the network so the manual reindex runs offline.
+    import app.ingest.pipeline as pipeline
+    from app.ingest.sources import IngestSource
+    src = [IngestSource("api-test", "API Test", "https://example.gov.cy/x", "general")]
+    monkeypatch.setattr(
+        "app.ingest.scheduler.run_ingest",
+        lambda s: pipeline.run_ingest(s, sources=src,
+                                      fetch_html=lambda u: "<main><p>fresh official content</p></main>"),
+    )
+    body = client.post("/admin/reindex").json()
+    assert body["ok"] == 1
+    # New content is retrievable through the running app's KB (reloaded in place).
+    ans = client.post("/simulate", json={"user_id": "rx", "text": "fresh official content"}).json()
+    assert ans["replies"]
 
 
 def test_webhook_verify(client):

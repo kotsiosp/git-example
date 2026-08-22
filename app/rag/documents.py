@@ -67,10 +67,25 @@ def load_document(path: Path) -> Document:
     )
 
 
-def load_documents(sources_dir: Path) -> list[Document]:
-    """Load every ``*.md`` file under ``sources_dir`` (sorted for determinism)."""
-    sources_dir = Path(sources_dir)
-    if not sources_dir.exists():
-        raise FileNotFoundError(f"Sources directory does not exist: {sources_dir}")
-    docs = [load_document(p) for p in sorted(sources_dir.glob("*.md"))]
+def load_documents(sources_dir: Path | list[Path]) -> list[Document]:
+    """Load every ``*.md`` file under one or more directories (sorted for determinism).
+
+    A single directory must exist. When a list is given, non-existent directories are
+    skipped (so an optional ingested-content dir is fine before the first scan) — but at
+    least one must exist.
+    """
+    if isinstance(sources_dir, (list, tuple)):
+        dirs = [Path(d) for d in sources_dir]
+        existing = [d for d in dirs if d.exists()]
+        if not existing:
+            raise FileNotFoundError(f"No sources directory exists among: {dirs}")
+    else:
+        d = Path(sources_dir)
+        if not d.exists():
+            raise FileNotFoundError(f"Sources directory does not exist: {d}")
+        existing = [d]
+
+    docs: list[Document] = []
+    for d in existing:
+        docs.extend(load_document(p) for p in sorted(d.glob("*.md")))
     return docs

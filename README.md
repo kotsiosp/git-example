@@ -15,7 +15,7 @@ Implements the full product blueprint:
 
 | Phase | What | Status |
 |---|---|---|
-| 1 | Knowledge-base data moat (RAG pipeline) | ✅ (sample sources — swap for scraped official content) |
+| 1 | Knowledge-base data moat (RAG pipeline + weekly official-source re-scan) | ✅ (sample seed docs — verify auto-ingested content) |
 | 2 | WhatsApp Cloud API channel | ✅ |
 | 3.1 | Question-Answering bot | ✅ |
 | 3.2 | Document Checklist Generator (→ PDF) | ✅ |
@@ -55,7 +55,8 @@ app/
   prompts.py           strict system prompts (Q&A, checklist, extraction)
   i18n.py              EN/EL string catalog + language detection
   disclaimer.py        shared legal disclaimer + ΚΕΠ referral
-  rag/                 documents · chunking · bm25 · retriever
+  rag/                 documents · chunking · bm25 · retriever (in-place reload)
+  ingest/              sources registry · fetcher (httpx+bs4) · pipeline · weekly scheduler
   llm/                 client.py (Anthropic wrapper) · parsing.py (tolerant JSON)
   pdf/                 render.py (checklists + filled forms, Greek-capable)
   forms/               TD1/MEU1 form definitions + checklist topic definitions
@@ -66,7 +67,7 @@ app/
   main.py              FastAPI app + endpoints
 data/sources/          official-source documents (the knowledge base)
 scripts/ask.py         CLI: ask a question without the server
-tests/                 58 offline tests (LLM + WhatsApp stubbed)
+tests/                 65 offline tests (LLM + WhatsApp stubbed)
 docs/WHATSAPP.md       step-by-step Meta / WhatsApp setup
 Dockerfile · docker-compose.yml
 ```
@@ -120,6 +121,8 @@ docker compose up --build     # serves on :8000, persists state in a volume, Gre
 | POST | `/gdpr/erase` | Delete all stored data for a user |
 | GET  | `/gdpr/usage/{user_id}` | A user's current usage/quota (transparency) |
 | POST | `/admin/premium` | Toggle a user's premium flag (**demo — protect in prod**) |
+| POST | `/admin/reindex` | Run the official-source scan now (**demo — protect in prod**) |
+| GET  | `/admin/ingest/status` | Last scan outcome + schedule config |
 
 ## Features in detail
 
@@ -151,7 +154,7 @@ volume for `DATA_DIR`. See Phase 5 notes below.
 ## Testing
 
 ```bash
-pytest -q      # 58 tests, fully offline — no API key, no network
+pytest -q      # 65 tests, fully offline — no API key, no network
 ```
 
 Tests stub the Claude client and WhatsApp transport, covering chunking, BM25, retrieval,
@@ -161,12 +164,44 @@ PDF generation, usage/metering, i18n + language detection, the WhatsApp client
 chat endpoint and safe file serving). The web UI itself was verified end-to-end in a real
 browser (menu → tappable checklist → PDF card, plus the Greek path).
 
+## Weekly knowledge-base re-scan
+
+The app can refresh its knowledge base from official Cyprus sites automatically.
+
+- Sources are registered in `app/ingest/sources.py` (URL + title + category per document).
+- On a configurable schedule (default **weekly**) the scan fetches each source, extracts
+  readable text (headings/paragraphs/lists, boilerplate stripped), and writes it into the
+  **ingested** directory (`$DATA_DIR/ingested`) — kept **separate** from the curated
+  `data/sources/` so a scan never overwrites hand-verified content. Both are indexed.
+- The knowledge base then **reloads in place**, so live WhatsApp/web sessions pick up new
+  content with no restart.
+- Change detection (content hashing) records what actually changed each run; a source that
+  fails to fetch is logged and its existing document is left untouched — a bad scan never
+  destroys good content.
+
+Enable and control it via env (`.env.example`):
+
+```
+INGEST_ENABLED=true
+INGEST_INTERVAL_HOURS=168     # weekly
+INGEST_ON_STARTUP=false
+```
+
+Trigger a scan on demand (also works when the schedule is off) and check status:
+
+```bash
+curl -X POST localhost:8000/admin/reindex        # runs the scan now, reloads the KB
+curl localhost:8000/admin/ingest/status          # last run + schedule config
+```
+
+> Protect `/admin/*` behind auth in production. Review auto-ingested content for accuracy
+> before relying on specifics — it supplements, and does not replace, the curated docs.
+
 ## Going to production
 
-- **Knowledge base:** replace the samples in `data/sources/` with scraped/downloaded
-  official content (gov.cy, Registrar of Companies, CRMD, GeSy, Tax Department). One
-  Markdown file per procedure with accurate `title`/`source_url`. Restart to re-index.
-  (See `data/README.md`.)
+- **Knowledge base:** enable the weekly scan (above) and/or replace the samples in
+  `data/sources/` with verified official content. One Markdown file per procedure with
+  accurate `title`/`source_url`. (See `data/README.md`.)
 - **Forms:** verify each form's official field set in `app/forms/definitions.py`; ideally
   overlay onto the real official PDF templates.
 - **Scale:** move sessions from in-memory `SessionStore` to Redis; move `Store` to

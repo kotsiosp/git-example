@@ -45,6 +45,16 @@ class Settings(BaseSettings):
     # --- Freemium (Phase 4) -------------------------------------------------
     free_inquiries_per_month: int = 3
 
+    # --- Knowledge-base ingestion (weekly official-source re-scan) ----------
+    # Opt-in: enabling it makes the app fetch government sites on a schedule.
+    ingest_enabled: bool = False
+    ingest_interval_hours: int = 168        # weekly
+    ingest_on_startup: bool = False         # also run once shortly after boot
+    ingest_timeout_seconds: float = 30.0
+    ingest_user_agent: str = (
+        "CyprusCitizenAgent/1.0 (+https://example.com; knowledge-base refresh)"
+    )
+
     # --- WhatsApp Cloud API (Phase 2) --------------------------------------
     # From Meta / Facebook Developer app -> WhatsApp product.
     whatsapp_token: str | None = None            # permanent/system-user access token
@@ -66,6 +76,16 @@ class Settings(BaseSettings):
     @property
     def pdf_output_dir(self) -> Path:
         return self.output_dir or (self.data_dir / "output")
+
+    @property
+    def ingested_dir(self) -> Path:
+        """Where the weekly scan writes auto-fetched official documents (runtime state)."""
+        return self.data_dir / "ingested"
+
+    @property
+    def source_dirs(self) -> list[Path]:
+        """All directories the knowledge base indexes: curated + auto-ingested."""
+        return [self.sources_dir, self.ingested_dir]
 
     @property
     def whatsapp_configured(self) -> bool:
