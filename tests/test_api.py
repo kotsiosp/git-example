@@ -26,6 +26,7 @@ def client(monkeypatch, kb, stub_client, settings, store):
     settings = settings.model_copy(update={
         "whatsapp_verify_token": "verify-me",
         "whatsapp_app_secret": "s3cret",
+        "admin_token": "test-admin-token",
     })
     usage = UsageService(store, settings.free_inquiries_per_month)
     qa = QAService(kb, stub_client, settings)
@@ -110,14 +111,26 @@ def test_gdpr_erase_and_usage(client):
     assert client.get("/gdpr/usage/g1").json()["used"] == 0
 
 
+ADMIN_HDR = {"X-Admin-Token": "test-admin-token"}
+
+
 def test_admin_premium(client):
-    body = client.post("/admin/premium", json={"user_id": "vip", "premium": True}).json()
+    body = client.post("/admin/premium", json={"user_id": "vip", "premium": True},
+                       headers=ADMIN_HDR).json()
     assert body["premium"] is True
     assert body["remaining"] == -1
 
 
+def test_admin_requires_token(client):
+    # No token -> 401; wrong token -> 401.
+    assert client.post("/admin/premium", json={"user_id": "x", "premium": True}).status_code == 401
+    assert client.get("/admin/ingest/status",
+                      headers={"X-Admin-Token": "nope"}).status_code == 401
+    assert client.post("/admin/reindex").status_code == 401
+
+
 def test_ingest_status_endpoint(client):
-    body = client.get("/admin/ingest/status").json()
+    body = client.get("/admin/ingest/status", headers=ADMIN_HDR).json()
     assert body["enabled"] is False        # opt-in; off by default in tests
     assert body["interval_hours"] == 168   # weekly
     assert body["sources"] >= 1
@@ -133,7 +146,7 @@ def test_reindex_endpoint(client, monkeypatch):
         lambda s: pipeline.run_ingest(s, sources=src,
                                       fetch_html=lambda u: "<main><p>fresh official content</p></main>"),
     )
-    body = client.post("/admin/reindex").json()
+    body = client.post("/admin/reindex", headers=ADMIN_HDR).json()
     assert body["ok"] == 1
     # New content is retrievable through the running app's KB (reloaded in place).
     ans = client.post("/simulate", json={"user_id": "rx", "text": "fresh official content"}).json()

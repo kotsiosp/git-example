@@ -67,6 +67,9 @@ class Settings(BaseSettings):
 
     # --- App ----------------------------------------------------------------
     app_name: str = "Cyprus Bureaucracy & Citizen Agent"
+    # Token required for /admin/* endpoints (sent as the X-Admin-Token header).
+    # If unset, the admin API is disabled (fail-closed) rather than left open.
+    admin_token: str | None = None
 
     # --- Derived paths ------------------------------------------------------
     @property

@@ -67,7 +67,7 @@ app/
   main.py              FastAPI app + endpoints
 data/sources/          official-source documents (the knowledge base)
 scripts/ask.py         CLI: ask a question without the server
-tests/                 65 offline tests (LLM + WhatsApp stubbed)
+tests/                 66 offline tests (LLM + WhatsApp stubbed)
 docs/WHATSAPP.md       step-by-step Meta / WhatsApp setup
 Dockerfile · docker-compose.yml
 ```
@@ -120,9 +120,17 @@ docker compose up --build     # serves on :8000, persists state in a volume, Gre
 | POST | `/webhook/whatsapp` | Inbound WhatsApp messages (HMAC-verified) |
 | POST | `/gdpr/erase` | Delete all stored data for a user |
 | GET  | `/gdpr/usage/{user_id}` | A user's current usage/quota (transparency) |
-| POST | `/admin/premium` | Toggle a user's premium flag (**demo — protect in prod**) |
-| POST | `/admin/reindex` | Run the official-source scan now (**demo — protect in prod**) |
-| GET  | `/admin/ingest/status` | Last scan outcome + schedule config |
+| POST | `/admin/premium` | Toggle a user's premium flag (**admin token required**) |
+| POST | `/admin/reindex` | Run the official-source scan now (**admin token required**) |
+| GET  | `/admin/ingest/status` | Last scan outcome + schedule config (**admin token required**) |
+
+`/admin/*` endpoints require the `X-Admin-Token` header to match `ADMIN_TOKEN`. If
+`ADMIN_TOKEN` is unset the admin API is **disabled** (fail-closed), so it's never
+accidentally left open:
+
+```bash
+curl -X POST localhost:8000/admin/reindex -H "X-Admin-Token: $ADMIN_TOKEN"
+```
 
 ## Features in detail
 
@@ -154,7 +162,7 @@ volume for `DATA_DIR`. See Phase 5 notes below.
 ## Testing
 
 ```bash
-pytest -q      # 65 tests, fully offline — no API key, no network
+pytest -q      # 66 tests, fully offline — no API key, no network
 ```
 
 Tests stub the Claude client and WhatsApp transport, covering chunking, BM25, retrieval,
@@ -194,8 +202,8 @@ curl -X POST localhost:8000/admin/reindex        # runs the scan now, reloads th
 curl localhost:8000/admin/ingest/status          # last run + schedule config
 ```
 
-> Protect `/admin/*` behind auth in production. Review auto-ingested content for accuracy
-> before relying on specifics — it supplements, and does not replace, the curated docs.
+> `/admin/*` requires `ADMIN_TOKEN` (see Endpoints). Review auto-ingested content for
+> accuracy before relying on specifics — it supplements, not replaces, the curated docs.
 
 ## Going to production
 
@@ -208,5 +216,6 @@ curl localhost:8000/admin/ingest/status          # last run + schedule config
   Postgres; run multiple workers.
 - **GDPR (Phase 5):** EU hosting (e.g. AWS Frankfurt), encryption at rest for `DATA_DIR`,
   the erasure endpoint (implemented), and the in-app disclaimer (implemented).
-- **Security:** protect `/admin/*`, set `WHATSAPP_APP_SECRET` so inbound webhooks are
-  signature-verified, and keep secrets in `.env` / a secret manager (never in git).
+- **Security:** set `ADMIN_TOKEN` (guards `/admin/*`) and `WHATSAPP_APP_SECRET` (so inbound
+  webhooks are signature-verified), and keep secrets in `.env` / a secret manager (never in
+  git).

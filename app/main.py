@@ -13,6 +13,7 @@ Run locally:
 """
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 from collections import deque
@@ -20,7 +21,7 @@ from contextlib import asynccontextmanager
 
 from pathlib import Path
 
-from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, StreamingResponse
 
 from .config import get_settings
@@ -152,6 +153,19 @@ def _svc(name: str):
 def _settings():
     """Settings the running app was built with (falls back to the global singleton)."""
     return _state.get("settings") or get_settings()
+
+
+def require_admin(x_admin_token: str | None = Header(default=None)) -> None:
+    """Guard /admin/* endpoints. Fail-closed: if no ADMIN_TOKEN is configured, deny.
+
+    This prevents the admin API (reindex, premium, ingest status) from being left open in
+    a real deployment. Set ADMIN_TOKEN and send it as the X-Admin-Token header.
+    """
+    token = _settings().admin_token
+    if not token:
+        raise HTTPException(status_code=403, detail="Admin API disabled: set ADMIN_TOKEN")
+    if not x_admin_token or not hmac.compare_digest(x_admin_token, token):
+        raise HTTPException(status_code=401, detail="Invalid admin token")
 
 
 # --------------------------------------------------------------------------- #
@@ -351,9 +365,9 @@ def gdpr_usage(user_id: str) -> UsageResponse:
                          remaining=q.remaining, premium=q.premium)
 
 
-@app.post("/admin/premium", response_model=UsageResponse)
+@app.post("/admin/premium", response_model=UsageResponse, dependencies=[Depends(require_admin)])
 def admin_premium(req: PremiumRequest) -> UsageResponse:
-    """Set a user's premium flag. DEMO ONLY — protect this behind auth in production."""
+    """Set a user's premium flag. Requires the X-Admin-Token header."""
     store: Store = _svc("store")
     usage: UsageService = _svc("usage")
     store.set_premium(req.user_id, req.premium)
@@ -365,19 +379,19 @@ def admin_premium(req: PremiumRequest) -> UsageResponse:
 # --------------------------------------------------------------------------- #
 # Knowledge-base ingestion (weekly scan) — manual trigger + status
 # --------------------------------------------------------------------------- #
-@app.post("/admin/reindex")
+@app.post("/admin/reindex", dependencies=[Depends(require_admin)])
 def admin_reindex() -> dict:
     """Run the official-source scan now and reload the knowledge base.
 
-    DEMO/admin endpoint — protect it behind auth in production. Runs even when the weekly
-    schedule is disabled, so you can seed/refresh content on demand.
+    Requires the X-Admin-Token header. Runs even when the weekly schedule is disabled,
+    so you can seed/refresh content on demand.
     """
     scheduler: IngestScheduler = _svc("ingest_scheduler")
     report = scheduler.run_sync()
     return report.to_dict()
 
 
-@app.get("/admin/ingest/status")
+@app.get("/admin/ingest/status", dependencies=[Depends(require_admin)])
 def admin_ingest_status() -> dict:
     """Return the last scan outcome and the ingestion schedule configuration."""
     settings = _settings()
