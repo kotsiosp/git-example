@@ -13,3 +13,23 @@
 
 # Dependency directories (remove the comment below to include it)
 # vendor/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local secrets / config
+.env
+
+# Runtime state (sqlite db, generated PDFs)
+var/
+*.db
+*.db-journal
+

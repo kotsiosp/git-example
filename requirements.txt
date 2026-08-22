@@ -1,0 +1,13 @@
+# Cyprus Bureaucracy & Citizen Agent — Q&A (RAG) MVP
+# Runtime
+anthropic>=0.49            # Claude API SDK (installs its own httpx2 backend)
+fastapi>=0.110             # HTTP API
+uvicorn[standard]>=0.29    # ASGI server
+pydantic>=2.6              # models / validation (also pulled in by fastapi)
+pydantic-settings>=2.2     # env-driven configuration
+reportlab>=4.0             # PDF generation (checklists + filled forms)
+httpx>=0.27               # WhatsApp Cloud API + ingestion fetches + TestClient
+beautifulsoup4>=4.12       # HTML -> text extraction for the weekly ingestion scan
+
+# Dev / test
+pytest>=8.0
