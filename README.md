@@ -1,132 +1,157 @@
-# Cyprus Bureaucracy & Citizen Agent — Q&A (RAG) MVP
+# Cyprus Bureaucracy & Citizen Agent
 
-An AI assistant that answers questions about Republic of Cyprus public-administration
-procedures (residency, tax, GeSy health, company formation, VAT) **grounded in official
-documents**. It uses Retrieval-Augmented Generation (RAG): the app first looks up the
-relevant official text, then asks Claude to explain it in plain language — and to say
-"I don't know, go to a Citizens Service Centre (ΚΕΠ)" when the answer isn't in the
-sources.
+An AI assistant for **Republic of Cyprus** public-administration procedures (residency,
+tax, GeSy health, VAT, company formation), delivered over **WhatsApp**. It answers
+questions, builds personalised **document checklists**, and **pre-fills official forms** —
+all grounded in official documents via Retrieval-Augmented Generation (RAG), so it cites
+sources and says "I don't know, go to a Citizens Service Centre (ΚΕΠ)" when the answer
+isn't in the sources.
 
-This is the **Phase 1 + Phase 3.1** slice of the product blueprint: the knowledge-base
-data moat and the Question-Answering bot. The Document Checklist Generator and Form
-Filler are designed to slot in later behind the same retrieval layer.
+Implements the full product blueprint:
+
+| Phase | What | Status |
+|---|---|---|
+| 1 | Knowledge-base data moat (RAG pipeline) | ✅ (sample sources — swap for scraped official content) |
+| 2 | WhatsApp Cloud API channel | ✅ |
+| 3.1 | Question-Answering bot | ✅ |
+| 3.2 | Document Checklist Generator (→ PDF) | ✅ |
+| 3.3 | Form Filler — auto-fill MEU1 / TD1 (→ PDF) | ✅ |
+| 4 | Freemium metering (N free inquiries/month) | ✅ |
+| 5 | GDPR: erasure, minimal retention, EU hosting notes | ✅ |
 
 > ⚠️ Not affiliated with the Republic of Cyprus. Not legal or tax advice. The seed
-> documents in `data/sources/` are **illustrative samples** — see `data/README.md`.
+> documents and form field lists are **illustrative samples** — see `data/README.md` and
+> `app/forms/definitions.py`.
 
 ## Architecture
 
 ```
-question ──▶ KnowledgeBase.retrieve()      # BM25 over chunked official docs (offline)
-                    │  top-k official chunks (with title + source URL)
-                    ▼
-             QAService  ──▶ ClaudeClient    # strict system prompt + cached context
-                    │                        # streaming answer, inline [Source N] cites
-                    ▼
-             Answer { text, citations[], grounded, disclaimer }
+WhatsApp  ──►  /webhook/whatsapp  ──►  ConversationService (state machine, per user)
+ (Cloud API)      (verify + HMAC)          │
+                                           ├─ Q&A ........ KnowledgeBase.retrieve() ─► Claude (streamed, cited)
+                                           ├─ Checklist .. 3 questions ─► Claude ─► PDF
+                                           ├─ Form Filler  free text ─► Claude field extraction ─► PDF
+                                           ├─ Freemium ... SQLite usage metering + premium flag
+                                           └─ GDPR ....... "delete my data" ─► erase
+                                           │
+                        replies (text + PDF documents) ──► WhatsApp Cloud API (send / media upload)
 ```
 
-- **Retrieval** is a dependency-free **BM25** index (`app/rag/`). No embedding API key is
-  needed, so retrieval and the whole test suite run offline and deterministically. Swap
-  in a vector store (e.g. Voyage AI embeddings) later behind `KnowledgeBase.retrieve()`.
-- **Generation** uses the Anthropic SDK (`app/llm/client.py`) with a strict system prompt
-  that forbids guessing, requires citations, and defers to official sources.
-- **API** is FastAPI (`app/main.py`) with JSON and streaming (NDJSON) endpoints.
+- **Retrieval** is a dependency-free **BM25** index (`app/rag/`) — no embedding key
+  needed, so retrieval, PDF generation, the router, and the whole test suite run offline
+  and deterministically. Swap in a vector store behind `KnowledgeBase.retrieve()` later.
+- **Generation** uses the Anthropic SDK (`claude-opus-5`, adaptive thinking, streaming,
+  prompt caching, refusal fallback).
+- **The conversation router** (`app/services/conversation.py`) is pure/testable — it turns
+  a message into a list of outbound actions; the webhook layer does the network I/O.
 
 ```
 app/
-  config.py         env-driven settings
-  prompts.py        strict Cyprus system prompt + context formatting
-  disclaimer.py     shared legal disclaimer + ΚΕΠ referral text
-  rag/              documents.py · chunking.py · bm25.py · retriever.py
-  llm/client.py     Anthropic SDK wrapper (streaming, prompt caching, refusal fallback)
-  services/qa.py    retrieve + generate orchestration
-  main.py           FastAPI app: /health, /ask, /ask/stream
-data/sources/       official-source Markdown documents (the knowledge base)
-scripts/ask.py      CLI: ask a question without running the server
-tests/              offline tests (chunking, BM25, retrieval, API with stubbed LLM)
+  config.py            env-driven settings
+  prompts.py           strict system prompts (Q&A, checklist, extraction)
+  disclaimer.py        shared legal disclaimer + ΚΕΠ referral
+  rag/                 documents · chunking · bm25 · retriever
+  llm/                 client.py (Anthropic wrapper) · parsing.py (tolerant JSON)
+  pdf/                 render.py (checklists + filled forms, Greek-capable)
+  forms/               TD1/MEU1 form definitions + checklist topic definitions
+  storage/             SQLite: usage metering, premium, GDPR erasure
+  whatsapp/            Cloud API client · webhook parse/verify
+  services/            qa · checklist · formfiller · usage · conversation (router)
+  main.py              FastAPI app + endpoints
+data/sources/          official-source documents (the knowledge base)
+scripts/ask.py         CLI: ask a question without the server
+tests/                 50 offline tests (LLM + WhatsApp stubbed)
+docs/WHATSAPP.md       step-by-step Meta / WhatsApp setup
+Dockerfile · docker-compose.yml
 ```
 
-## Setup
+## Quick start
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env      # then add your ANTHROPIC_API_KEY
-```
-
-## Run
-
-```bash
-# HTTP API
+cp .env.example .env        # add ANTHROPIC_API_KEY (+ WhatsApp creds to go live)
 uvicorn app.main:app --reload
-# open http://127.0.0.1:8000/docs
-
-# One-off from the CLI
-python -m scripts.ask "I just moved to Limassol, how do I get a Yellow Slip?"
-
-# See only the retrieved official sources (no API key / no API call)
-python -m scripts.ask --sources-only "when do I register for VAT?"
 ```
 
-### API
+Then either connect WhatsApp (see **`docs/WHATSAPP.md`**) or drive the exact same
+conversation engine locally with the simulator:
 
 ```bash
-curl -s http://127.0.0.1:8000/ask \
-  -H 'content-type: application/json' \
-  -d '{"question":"What documents do I need for a Yellow Slip?"}' | jq
+# Q&A
+curl -s localhost:8000/simulate -d '{"user_id":"me","text":"How do I get a Yellow Slip?"}' \
+  -H 'content-type: application/json' | jq
+
+# Checklist (multi-turn): checklist -> pick topic -> answer 3 questions -> PDF path returned
+curl -s localhost:8000/simulate -d '{"user_id":"me","text":"checklist"}' -H 'content-type: application/json'
+
+# One-off Q&A from the CLI (no server)
+python -m scripts.ask "What is the deadline for my tax return?"
+python -m scripts.ask --sources-only "when do I register for VAT?"   # no API key needed
 ```
 
-Response:
+### Docker
 
-```json
-{
-  "answer": "To apply for the Yellow Slip you submit form MEU1 ... [Source 1]",
-  "citations": [
-    {"n": 1, "title": "Yellow Slip — EU Citizen Registration Certificate (MEU1)",
-     "url": "https://www.moi.gov.cy/crmd", "category": "immigration", "score": 12.3}
-  ],
-  "grounded": true,
-  "disclaimer": "This app is an AI-powered assistant, not a legal or tax advisor. ..."
-}
+```bash
+docker compose up --build     # serves on :8000, persists state in a volume, Greek fonts included
 ```
 
-`POST /ask/stream` returns the same content as NDJSON: a `citations` line, then `token`
-lines, then a `done` line.
+## Endpoints
 
-## Configuration
-
-All settings are environment variables (see `.env.example`). Key ones:
-
-| Variable | Default | Notes |
+| Method | Path | Purpose |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | – | Required to generate answers; retrieval/tests work without it. |
-| `CLAUDE_MODEL` | `claude-opus-5` | Use `claude-sonnet-5` / `claude-haiku-4-5` for cheaper, high-volume traffic. |
-| `CLAUDE_EFFORT` | `medium` | `low`…`max`. Raise for harder reasoning. |
-| `RETRIEVAL_TOP_K` | `4` | Number of chunks passed to the model. |
+| GET  | `/health` | Liveness + KB stats + config flags |
+| POST | `/ask` | Q&A (JSON answer + citations) |
+| POST | `/ask/stream` | Q&A streamed as NDJSON |
+| GET  | `/webhook/whatsapp` | Meta webhook verification |
+| POST | `/webhook/whatsapp` | Inbound WhatsApp messages (HMAC-verified) |
+| POST | `/simulate` | Run the WhatsApp router locally (no Meta needed) |
+| POST | `/gdpr/erase` | Delete all stored data for a user |
+| GET  | `/gdpr/usage/{user_id}` | A user's current usage/quota (transparency) |
+| POST | `/admin/premium` | Toggle a user's premium flag (**demo — protect in prod**) |
 
-Server-side **refusal fallback** is enabled by default and applied automatically only
-for models that support it (`claude-opus-5` / `claude-fable-5`).
+## Features in detail
+
+**Q&A bot** — retrieves the top official chunks, sends them to Claude under a strict
+"answer only from these documents, cite `[Source N]`, otherwise defer to ΚΕΠ" prompt.
+
+**Checklist Generator** — asks 3 personalising questions per topic (Yellow Slip, company,
+GeSy, VAT, tax), then generates a tailored, grounded checklist and renders a printable
+**PDF** sent over WhatsApp.
+
+**Form Filler (premium)** — the user describes their details in plain English or Greek;
+Claude extracts the fields for the chosen form (MEU1 / TD1); the app renders a
+pre-filled, printable **PDF** and lists any required fields still missing.
+
+**Freemium** — `FREE_INQUIRIES_PER_MONTH` (default 3) metered per user in SQLite;
+menu/help/cancel/`delete my data` are always free; `upgrade` explains premium. Wire real
+billing to `Store.set_premium`.
+
+**GDPR** — only a monthly counter + premium flag are stored (no message content);
+`delete my data` (or `POST /gdpr/erase`) wipes it; host in the EU and mount an encrypted
+volume for `DATA_DIR`. See Phase 5 notes below.
 
 ## Testing
 
 ```bash
-pytest -q      # fully offline: no API key or network required
+pytest -q      # 50 tests, fully offline — no API key, no network
 ```
 
-## Building the real knowledge base (next step)
+Tests stub the Claude client and WhatsApp transport, covering chunking, BM25, retrieval,
+PDF generation, usage/metering, the WhatsApp client + webhook parsing/verification, every
+conversation flow (Q&A, checklist, form, freemium gate, GDPR), and the HTTP API.
 
-Replace the sample documents in `data/sources/` with scraped/downloaded official content
-from gov.cy, the Registrar of Companies, CRMD, GeSy, and the Tax Department. Keep one
-Markdown file per procedure with accurate `title` / `source_url` frontmatter, then
-restart the app to re-index. See `data/README.md`.
+## Going to production
 
-## Roadmap (from the blueprint)
-
-- [x] Phase 1 — knowledge-base data moat (RAG pipeline; sample sources)
-- [x] Phase 3.1 — Question-Answering bot (this MVP)
-- [ ] Phase 3.2 — Document Checklist Generator
-- [ ] Phase 3.3 — Form Filler (auto-fill TD1 / MEU1 PDFs) — premium
-- [ ] Phase 2 — WhatsApp Business API channel in front of `/ask`
-- [ ] Phase 4 — freemium metering (3 free inquiries/month) + billing
-- [ ] Phase 5 — GDPR: EU hosting, encryption at rest, data-erasure endpoint
+- **Knowledge base:** replace the samples in `data/sources/` with scraped/downloaded
+  official content (gov.cy, Registrar of Companies, CRMD, GeSy, Tax Department). One
+  Markdown file per procedure with accurate `title`/`source_url`. Restart to re-index.
+  (See `data/README.md`.)
+- **Forms:** verify each form's official field set in `app/forms/definitions.py`; ideally
+  overlay onto the real official PDF templates.
+- **Scale:** move sessions from in-memory `SessionStore` to Redis; move `Store` to
+  Postgres; run multiple workers.
+- **GDPR (Phase 5):** EU hosting (e.g. AWS Frankfurt), encryption at rest for `DATA_DIR`,
+  the erasure endpoint (implemented), and the in-app disclaimer (implemented).
+- **Security:** protect `/admin/*`, set `WHATSAPP_APP_SECRET` so inbound webhooks are
+  signature-verified, and keep secrets in `.env` / a secret manager (never in git).

@@ -1,10 +1,13 @@
-"""Thin wrapper around the Anthropic SDK for the Q&A use case.
+"""Thin wrapper around the Anthropic SDK for the agent's three LLM tasks.
+
+Tasks:
+- Q&A: strict, grounded answer (streaming).
+- Checklist generation: JSON {intro, items} grounded in retrieved docs + user answers.
+- Field extraction: JSON {field_key: value} from a user's free-text message.
 
 Design notes:
-- The strict Cyprus system prompt is stable, so we cache it (prompt caching) to cut cost
-  on every request after the first.
-- Streaming is used for the answer so long explanations don't hit HTTP timeouts and can
-  be forwarded to the client token-by-token.
+- Each task's stable system prompt is cached (prompt caching) to cut cost per request.
+- The Q&A answer streams so long explanations don't hit HTTP timeouts.
 - Server-side refusal fallback is enabled by default for opus-5 / fable-5 (per Anthropic
   guidance); it is skipped automatically for other models, which don't support it.
 """
@@ -14,7 +17,15 @@ from collections.abc import Iterator
 
 import anthropic
 
-from ..prompts import SYSTEM_PROMPT, build_user_message
+from ..prompts import (
+    CHECKLIST_SYSTEM_PROMPT,
+    EXTRACTION_SYSTEM_PROMPT,
+    SYSTEM_PROMPT,
+    build_checklist_message,
+    build_extraction_message,
+    build_user_message,
+)
+from .parsing import extract_json
 
 # Models that support the server-side refusal fallback beta.
 _FALLBACK_MODELS = {"claude-opus-5", "claude-fable-5", "claude-mythos-5"}
@@ -38,23 +49,32 @@ class ClaudeClient:
         self.use_fallback = enable_refusal_fallback and model in _FALLBACK_MODELS
 
     # -- request assembly ----------------------------------------------------
-    def _request_kwargs(self, question: str, sources: list[dict]) -> dict:
+    def _base_kwargs(self, system_text: str, user_content: str, max_tokens: int | None = None) -> dict:
         return {
             "model": self.model,
-            "max_tokens": self.max_tokens,
+            "max_tokens": max_tokens or self.max_tokens,
             "thinking": {"type": "adaptive"},
             "output_config": {"effort": self.effort},
-            # Stable system prompt cached across requests.
             "system": [
-                {"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}
+                {"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}
             ],
-            "messages": [{"role": "user", "content": build_user_message(question, sources)}],
+            "messages": [{"role": "user", "content": user_content}],
         }
 
-    # -- streaming -----------------------------------------------------------
+    def _complete(self, system_text: str, user_content: str, max_tokens: int | None = None) -> str:
+        """Non-streaming completion returning concatenated text blocks."""
+        kwargs = self._base_kwargs(system_text, user_content, max_tokens)
+        if self.use_fallback:
+            msg = self._client.beta.messages.create(
+                betas=[_FALLBACK_BETA], fallbacks="default", **kwargs
+            )
+        else:
+            msg = self._client.messages.create(**kwargs)
+        return "".join(b.text for b in msg.content if b.type == "text")
+
+    # -- Q&A (streaming) -----------------------------------------------------
     def stream_answer(self, question: str, sources: list[dict]) -> Iterator[str]:
-        """Yield answer text incrementally."""
-        kwargs = self._request_kwargs(question, sources)
+        kwargs = self._base_kwargs(SYSTEM_PROMPT, build_user_message(question, sources))
         if self.use_fallback:
             with self._client.beta.messages.stream(
                 betas=[_FALLBACK_BETA], fallbacks="default", **kwargs
@@ -64,7 +84,41 @@ class ClaudeClient:
             with self._client.messages.stream(**kwargs) as stream:
                 yield from stream.text_stream
 
-    # -- non-streaming (convenience for CLI / tests) -------------------------
     def answer(self, question: str, sources: list[dict]) -> str:
-        """Return the full answer text as a single string."""
         return "".join(self.stream_answer(question, sources))
+
+    # -- Checklist generation ------------------------------------------------
+    def generate_checklist(
+        self, topic_title: str, answers: dict, sources: list[dict]
+    ) -> tuple[str, list[str]]:
+        """Return (intro, items). Falls back to an empty list on unparseable output."""
+        user = build_checklist_message(topic_title, answers, sources)
+        text = self._complete(CHECKLIST_SYSTEM_PROMPT, user)
+        try:
+            data = extract_json(text)
+        except ValueError:
+            return "", []
+        intro = str(data.get("intro", "")) if isinstance(data, dict) else ""
+        raw_items = data.get("items", []) if isinstance(data, dict) else []
+        items = [str(i).strip() for i in raw_items if str(i).strip()]
+        return intro, items
+
+    # -- Field extraction ----------------------------------------------------
+    def extract_fields(
+        self, form_title: str, field_defs: list[dict], user_text: str
+    ) -> dict[str, str]:
+        """Extract {field_key: value} from free text. Keys are constrained to field_defs."""
+        allowed = {f["key"] for f in field_defs}
+        user = build_extraction_message(form_title, field_defs, user_text)
+        text = self._complete(EXTRACTION_SYSTEM_PROMPT, user)
+        try:
+            data = extract_json(text)
+        except ValueError:
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        out: dict[str, str] = {}
+        for key, value in data.items():
+            if key in allowed and value not in (None, "", []):
+                out[key] = str(value).strip()
+        return out

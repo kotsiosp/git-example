@@ -32,3 +32,43 @@ class HealthResponse(BaseModel):
     chunks: int
     model: str
     api_key_configured: bool
+    whatsapp_configured: bool
+
+
+class SimulateRequest(BaseModel):
+    user_id: str = Field(..., min_length=1, max_length=64, examples=["35799123456"])
+    text: str = Field(..., min_length=1, max_length=2000)
+
+
+class OutboundOut(BaseModel):
+    kind: str
+    text: str = ""
+    filename: str = ""
+    caption: str = ""
+    pdf_path: str | None = None
+
+
+class SimulateResponse(BaseModel):
+    replies: list[OutboundOut]
+
+
+class EraseRequest(BaseModel):
+    user_id: str = Field(..., min_length=1, max_length=64)
+
+
+class EraseResponse(BaseModel):
+    user_id: str
+    erased: bool
+
+
+class PremiumRequest(BaseModel):
+    user_id: str = Field(..., min_length=1, max_length=64)
+    premium: bool = True
+
+
+class UsageResponse(BaseModel):
+    user_id: str
+    used: int
+    limit: int
+    remaining: int
+    premium: bool

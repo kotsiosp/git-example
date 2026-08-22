@@ -1,7 +1,8 @@
 """Application configuration, driven by environment variables (and an optional .env file).
 
-Nothing here requires a secret to *import* the app — the ANTHROPIC_API_KEY is only
-needed when an actual answer is generated, so retrieval and tests run without it.
+Nothing here requires a secret to *import* the app — the ANTHROPIC_API_KEY and WhatsApp
+credentials are only needed for live calls, so retrieval, PDF generation, the
+conversation router, and the full test suite run without any of them.
 """
 from __future__ import annotations
 
@@ -13,6 +14,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # Repo root (…/app/config.py -> repo root is two parents up from this file's dir).
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_SOURCES_DIR = ROOT_DIR / "data" / "sources"
+DEFAULT_DATA_DIR = ROOT_DIR / "var"  # runtime state (sqlite db, generated PDFs)
 
 
 class Settings(BaseSettings):
@@ -24,7 +26,6 @@ class Settings(BaseSettings):
     anthropic_api_key: str | None = None
     claude_model: str = "claude-opus-5"
     # Effort trades depth vs. cost/latency: low | medium | high | xhigh | max.
-    # "medium" is a sensible default for explain-the-law Q&A; raise for harder reasoning.
     claude_effort: str = "medium"
     claude_max_tokens: int = 2048
     # Server-side refusal fallback is honoured only for opus-5 / fable-5 (see llm/client.py).
@@ -33,13 +34,42 @@ class Settings(BaseSettings):
     # --- Retrieval ----------------------------------------------------------
     sources_dir: Path = DEFAULT_SOURCES_DIR
     retrieval_top_k: int = 4
-    # Chunking (token-ish; we count words as a cheap proxy).
     chunk_size_words: int = 220
     chunk_overlap_words: int = 40
 
-    # --- API ----------------------------------------------------------------
+    # --- Storage / runtime state -------------------------------------------
+    data_dir: Path = DEFAULT_DATA_DIR
+    database_path: Path | None = None  # defaults to <data_dir>/app.db
+    output_dir: Path | None = None     # generated PDFs; defaults to <data_dir>/output
+
+    # --- Freemium (Phase 4) -------------------------------------------------
+    free_inquiries_per_month: int = 3
+
+    # --- WhatsApp Cloud API (Phase 2) --------------------------------------
+    # From Meta / Facebook Developer app -> WhatsApp product.
+    whatsapp_token: str | None = None            # permanent/system-user access token
+    whatsapp_phone_number_id: str | None = None  # the sending phone number id
+    whatsapp_verify_token: str | None = None     # your chosen webhook verify token
+    whatsapp_app_secret: str | None = None       # app secret, to verify webhook signatures
+    whatsapp_graph_version: str = "v21.0"
+    # Public base URL of THIS service (used only if you send media by link instead of upload).
+    public_base_url: str | None = None
+
+    # --- App ----------------------------------------------------------------
     app_name: str = "Cyprus Bureaucracy & Citizen Agent"
-    free_inquiries_per_month: int = 3  # documented for the freemium model; not enforced here
+
+    # --- Derived paths ------------------------------------------------------
+    @property
+    def db_path(self) -> Path:
+        return self.database_path or (self.data_dir / "app.db")
+
+    @property
+    def pdf_output_dir(self) -> Path:
+        return self.output_dir or (self.data_dir / "output")
+
+    @property
+    def whatsapp_configured(self) -> bool:
+        return bool(self.whatsapp_token and self.whatsapp_phone_number_id)
 
 
 @lru_cache

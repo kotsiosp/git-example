@@ -28,3 +28,8 @@ env/
 # Local secrets / config
 .env
 
+# Runtime state (sqlite db, generated PDFs)
+var/
+*.db
+*.db-journal
+
