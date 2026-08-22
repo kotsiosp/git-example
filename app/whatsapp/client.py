@@ -54,6 +54,53 @@ class WhatsAppClient:
         }
         return self._post(f"{self.phone_number_id}/messages", json=payload)
 
+    def send_interactive(self, to: str, body: str, options: list[tuple[str, str]]) -> dict:
+        """Send a tappable prompt: reply buttons for <=3 short options, else a list menu.
+
+        ``options`` are (id, title) pairs. WhatsApp limits button titles to 20 chars and
+        list-row titles to 24, so titles are truncated for display; the id carries the
+        selection and is matched exactly by the router.
+        """
+        if not options:
+            return self.send_text(to, body)
+
+        short = len(options) <= 3 and all(len(title) <= 20 for _, title in options)
+        if short:
+            interactive = {
+                "type": "button",
+                "body": {"text": body[:1024] or "…"},
+                "action": {
+                    "buttons": [
+                        {"type": "reply", "reply": {"id": oid[:256], "title": title[:20]}}
+                        for oid, title in options
+                    ]
+                },
+            }
+        else:
+            rows = [
+                {"id": oid[:200], "title": title[:24], "description": ""}
+                for oid, title in options[:10]  # WhatsApp lists allow up to 10 rows
+            ]
+            interactive = {
+                "type": "list",
+                "body": {"text": body[:1024] or "…"},
+                "action": {"button": "Choose", "sections": [{"title": "Options", "rows": rows}]},
+            }
+
+        payload = {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": to,
+            "type": "interactive",
+            "interactive": interactive,
+        }
+        return self._post(f"{self.phone_number_id}/messages", json=payload)
+
+    def mark_read(self, message_id: str) -> dict:
+        """Mark an inbound message as read (blue ticks). Best-effort."""
+        payload = {"messaging_product": "whatsapp", "status": "read", "message_id": message_id}
+        return self._post(f"{self.phone_number_id}/messages", json=payload)
+
     def upload_media(self, file_path: Path | str, mime_type: str | None = None) -> str:
         """Upload a file and return its media id."""
         file_path = Path(file_path)

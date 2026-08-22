@@ -50,6 +50,9 @@ In **WhatsApp → Configuration → Webhook**:
 
 ## 5. Test it
 
+Menus and options appear as **tappable buttons/lists**, the bot replies in the user's
+language (English or Greek, auto-detected), and inbound messages are marked read.
+
 Message your WhatsApp test number (or add your own number as a recipient in API Setup).
 Try:
 

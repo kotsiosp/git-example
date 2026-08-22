@@ -18,8 +18,10 @@ import logging
 from collections import deque
 from contextlib import asynccontextmanager
 
+from pathlib import Path
+
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
-from fastapi.responses import PlainTextResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, StreamingResponse
 
 from .config import get_settings
 from .disclaimer import DISCLAIMER
@@ -32,6 +34,7 @@ from .schemas import (
     EraseRequest,
     EraseResponse,
     HealthResponse,
+    OptionOut,
     OutboundOut,
     PremiumRequest,
     SimulateRequest,
@@ -240,6 +243,11 @@ def _process_messages(messages: list) -> None:
             if msg.message_id in seen:
                 continue
             seen.append(msg.message_id)
+        if whatsapp is not None and msg.message_id:
+            try:
+                whatsapp.mark_read(msg.message_id)
+            except Exception:  # pragma: no cover - read receipts are best-effort
+                pass
         try:
             reply = conversation.handle(msg.from_, msg.text)
         except Exception:  # pragma: no cover - defensive
@@ -256,6 +264,8 @@ def _send_reply(whatsapp: WhatsAppClient | None, to: str, reply: Reply) -> None:
         try:
             if out.kind == "text":
                 whatsapp.send_text(to, out.text)
+            elif out.kind == "interactive":
+                whatsapp.send_interactive(to, out.text, out.options)
             elif out.kind == "document" and out.path:
                 whatsapp.send_document(to, out.path, filename=out.filename, caption=out.caption)
         except Exception:  # pragma: no cover - network errors shouldn't crash the worker
@@ -265,19 +275,49 @@ def _send_reply(whatsapp: WhatsAppClient | None, to: str, reply: Reply) -> None:
 # --------------------------------------------------------------------------- #
 # Local testing without Meta: simulate an inbound message
 # --------------------------------------------------------------------------- #
+def _to_outbound_out(o) -> OutboundOut:
+    return OutboundOut(
+        kind=o.kind,
+        text=o.text,
+        options=[OptionOut(id=oid, title=title) for oid, title in o.options],
+        filename=o.filename,
+        caption=o.caption,
+        pdf_path=str(o.path) if o.path else None,
+        file_url=f"/files/{o.path.name}" if o.path else None,
+    )
+
+
 @app.post("/simulate", response_model=SimulateResponse)
+@app.post("/web/message", response_model=SimulateResponse)
 def simulate(req: SimulateRequest) -> SimulateResponse:
     conversation: ConversationService = _svc("conversation")
     reply = conversation.handle(req.user_id, req.text)
-    return SimulateResponse(
-        replies=[
-            OutboundOut(
-                kind=o.kind, text=o.text, filename=o.filename, caption=o.caption,
-                pdf_path=str(o.path) if o.path else None,
-            )
-            for o in reply.outbound
-        ]
-    )
+    return SimulateResponse(replies=[_to_outbound_out(o) for o in reply.outbound])
+
+
+# --------------------------------------------------------------------------- #
+# Web chat demo UI + PDF serving
+# --------------------------------------------------------------------------- #
+_WEB_INDEX = Path(__file__).resolve().parent / "web" / "index.html"
+
+
+@app.get("/", response_class=HTMLResponse)
+def web_index() -> HTMLResponse:
+    return HTMLResponse(_WEB_INDEX.read_text(encoding="utf-8"))
+
+
+@app.get("/files/{filename}")
+def serve_file(filename: str):
+    """Serve a generated PDF. Path-traversal-safe: only a bare filename under output_dir."""
+    settings = _settings()
+    out_dir = Path(settings.pdf_output_dir).resolve()
+    # Reject anything that isn't a simple filename.
+    if "/" in filename or "\\" in filename or filename in ("", ".", ".."):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    target = (out_dir / filename).resolve()
+    if target.parent != out_dir or not target.is_file():
+        raise HTTPException(status_code=404, detail="Not found")
+    return FileResponse(target, media_type="application/pdf", filename=filename)
 
 
 # --------------------------------------------------------------------------- #

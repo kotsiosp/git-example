@@ -6,10 +6,21 @@ def _first_text(reply):
     return reply.texts()[0] if reply.texts() else ""
 
 
-def test_menu(conversation):
+def test_menu_is_interactive(conversation):
     reply = conversation.handle("u1", "menu")
+    assert reply.outbound[0].kind == "interactive"
+    ids = {oid for oid, _ in reply.outbound[0].options}
+    assert {"ask", "checklist", "form"} <= ids
+    # First-time menu includes the welcome + disclaimer.
+    assert "Welcome" in _first_text(reply)
+
+
+def test_greek_is_detected_and_localised(conversation):
+    reply = conversation.handle("gr1", "Γεια")  # Greek greeting
     body = _first_text(reply)
-    assert "Ask a question" in body and "checklist" in body.lower()
+    assert "Καλώς" in body  # Greek welcome
+    titles = [title for _, title in reply.outbound[0].options]
+    assert any("Ερώτηση" in t for t in titles)
 
 
 def test_default_is_qa_with_citations(conversation):

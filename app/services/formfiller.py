@@ -58,7 +58,8 @@ class FormFillerService:
             raise KeyError(f"Unknown form: {form_key}")
         return [f.label for f in form.required_fields if not values.get(f.key)]
 
-    def fill(self, form_key: str, values: dict, write_pdf: bool = True) -> FormResult:
+    def fill(self, form_key: str, values: dict, write_pdf: bool = True,
+             disclaimer: str | None = None) -> FormResult:
         form = get_form(form_key)
         if form is None:
             raise KeyError(f"Unknown form: {form_key}")
@@ -83,7 +84,7 @@ class FormFillerService:
                 fields=ordered,
                 missing=missing,
                 note=form.note,
-                disclaimer=DISCLAIMER,
+                disclaimer=disclaimer or DISCLAIMER,
             )
             result.pdf_path = out
 

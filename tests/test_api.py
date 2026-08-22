@@ -66,7 +66,28 @@ def test_ask_stream(client):
 
 def test_simulate_menu(client):
     body = client.post("/simulate", json={"user_id": "u1", "text": "menu"}).json()
-    assert any("checklist" in r["text"].lower() for r in body["replies"])
+    reply = body["replies"][0]
+    assert reply["kind"] == "interactive"
+    assert {o["id"] for o in reply["options"]} >= {"ask", "checklist", "form"}
+
+
+def test_web_index_served(client):
+    r = client.get("/")
+    assert r.status_code == 200
+    assert "Cyprus" in r.text and "<html" in r.text.lower()
+
+
+def test_files_endpoint_serves_and_blocks_traversal(client):
+    # Generate a checklist to get a real PDF, then fetch it via /files.
+    for msg in ["checklist", "1", "1", "1", "1"]:
+        body = client.post("/web/message", json={"user_id": "wf", "text": msg}).json()
+    doc = next(r for r in body["replies"] if r["kind"] == "document")
+    assert doc["file_url"].startswith("/files/")
+    r = client.get(doc["file_url"])
+    assert r.status_code == 200 and r.content[:5] == b"%PDF-"
+
+    assert client.get("/files/..%2f..%2fetc%2fpasswd").status_code in (400, 404)
+    assert client.get("/files/nope.pdf").status_code == 404
 
 
 def test_simulate_checklist_returns_pdf(client):

@@ -40,12 +40,19 @@ class SimulateRequest(BaseModel):
     text: str = Field(..., min_length=1, max_length=2000)
 
 
+class OptionOut(BaseModel):
+    id: str
+    title: str
+
+
 class OutboundOut(BaseModel):
     kind: str
     text: str = ""
+    options: list[OptionOut] = Field(default_factory=list)
     filename: str = ""
     caption: str = ""
     pdf_path: str | None = None
+    file_url: str | None = None
 
 
 class SimulateResponse(BaseModel):

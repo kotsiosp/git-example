@@ -43,7 +43,8 @@ class ChecklistService:
     def _query(self, topic: ChecklistTopic, answers: dict) -> str:
         return topic.title + " " + " ".join(str(v) for v in answers.values())
 
-    def generate(self, topic_key: str, answers: dict, write_pdf: bool = True) -> ChecklistResult:
+    def generate(self, topic_key: str, answers: dict, write_pdf: bool = True,
+                 disclaimer: str | None = None) -> ChecklistResult:
         topic = get_topic(topic_key)
         if topic is None:
             raise KeyError(f"Unknown checklist topic: {topic_key}")
@@ -79,7 +80,7 @@ class ChecklistService:
                 intro=intro,
                 items=items,
                 sources=citations,
-                disclaimer=DISCLAIMER,
+                disclaimer=disclaimer or DISCLAIMER,
             )
             result.pdf_path = out
 

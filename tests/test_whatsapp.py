@@ -93,6 +93,42 @@ def test_client_send_text_and_document(tmp_path):
     assert doc_body["document"]["id"] == "media-123"
 
 
+def test_client_send_interactive_buttons_vs_list():
+    sent = []
+
+    def handler(request):
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={"messages": [{"id": "x"}]})
+
+    client = WhatsAppClient("t", "p", http_client=httpx.Client(transport=httpx.MockTransport(handler)))
+
+    # <=3 short options -> reply buttons.
+    client.send_interactive("1", "Pick", [("ask", "Ask"), ("checklist", "List")])
+    assert sent[-1]["interactive"]["type"] == "button"
+    assert len(sent[-1]["interactive"]["action"]["buttons"]) == 2
+
+    # >3 options -> list menu, capped at 10 rows, titles truncated to 24 chars.
+    opts = [(str(i), "A very long option title that exceeds limits " + str(i)) for i in range(12)]
+    client.send_interactive("1", "Pick many", opts)
+    inter = sent[-1]["interactive"]
+    assert inter["type"] == "list"
+    rows = inter["action"]["sections"][0]["rows"]
+    assert len(rows) == 10
+    assert all(len(r["title"]) <= 24 for r in rows)
+
+
+def test_client_mark_read():
+    sent = []
+
+    def handler(request):
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={"success": True})
+
+    client = WhatsAppClient("t", "p", http_client=httpx.Client(transport=httpx.MockTransport(handler)))
+    client.mark_read("wamid.abc")
+    assert sent[-1]["status"] == "read" and sent[-1]["message_id"] == "wamid.abc"
+
+
 def test_client_raises_on_error():
     def handler(request):
         return httpx.Response(400, json={"error": {"message": "bad"}})
