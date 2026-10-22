@@ -18,6 +18,8 @@ bookmaker odds**, and bets settle automatically from real results.
 - **Auto-settlement:** final scores come from the same API. A match with no result (for example, postponed) shows up
   on the master's *Settlement* page, where it can be settled or voided.
 - **Ledger:** every credit, bet, payout and refund is recorded, and the balance always equals the sum of the ledger.
+- **Cyprus horse racing:** race cards with live tote prices, and Win, Place and Each-way bets that pay the official
+  final dividend, like at the track. Withdrawn horses and abandoned races are refunded. See below.
 - No API key yet? The site runs with **demo fixtures** so you can try everything.
 
 ## Run locally
@@ -66,6 +68,24 @@ Other league keys include `soccer_greece_super_league`, `soccer_uefa_europa_leag
 `soccer_netherlands_eredivisie` and `soccer_portugal_primeira_liga`. See the
 [full list](https://the-odds-api.com/sports-odds-data/sports-apis.html).
 
+## Horse racing (Cyprus)
+
+Players see each race card with the horses, jockeys, weights, draw and form, plus the live **Win** and **Place**
+tote prices. Prices refresh every 30 seconds and freeze at the off.
+
+- **Tote rules:** the price shown is only a guide. Winning bets are paid the **official final dividend** (per 1
+  credit, stake included), which can be higher or lower than the price when the bet was placed.
+- **Place terms:** 1st–2nd for 5–7 runners, 1st–3rd for 8 or more, and no place betting below 5 runners.
+- **Each way:** one Win bet plus one Place bet of the same stake.
+- **Withdrawn horse or abandoned race:** the stake is refunded.
+- **Master *Racing* page:** enter a result and its dividends by hand, withdraw a horse, or abandon a race.
+
+**Data source:** the races are currently **demo data**: a simulated Nicosia meeting with a race every 30 minutes,
+moving prices, and results 8 minutes after the off. The plan is to take live prices, results and dividends from
+Racing NRC (racingnrc.com.cy). That connection isn't written yet, because its data format still has to be checked.
+A Racing NRC provider plugs into `src/racing.js` (the expected data shape is documented at the top of that file),
+and nothing else needs to change. Set `RACING_ENABLED=false` to hide horse racing entirely.
+
 ## How bets settle
 
 - **1X2:** decided on the final score reported by the results feed.
@@ -79,7 +99,9 @@ Other league keys include `soccer_greece_super_league`, `soccer_uefa_europa_leag
 src/server.js    startup, background refresh timers
 src/app.js       HTTP API (auth, betting, admin)
 src/odds.js      The Odds API client + demo feed
-src/settle.js    result → bet settlement
+src/settle.js    result → football bet settlement
+src/racing.js    horse racing feed (demo for now) + tote settlement
+src/racingRoutes.js  horse racing API
 src/db.js        SQLite schema (built into Node, no native modules)
 public/          single-page frontend (no build step)
 test/            node:test suite

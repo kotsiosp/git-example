@@ -102,8 +102,8 @@
 
   // ---------------------------------------------------------------- routing
 
-  const USER_VIEWS = { matches: 'Matches', bets: 'My bets', results: 'Results', history: 'Statement', account: 'Account' };
-  const ADMIN_VIEWS = { users: 'Players', allbets: 'All bets', settle: 'Settlement', feed: 'Odds feed', results: 'Results', account: 'Account' };
+  const USER_VIEWS = { matches: 'Football', horses: 'Horses', bets: 'My bets', results: 'Results', history: 'Statement', account: 'Account' };
+  const ADMIN_VIEWS = { users: 'Players', allbets: 'All bets', settle: 'Settlement', racing: 'Racing', feed: 'Odds feed', results: 'Results', account: 'Account' };
 
   function currentView() {
     const views = state.user?.role === 'admin' ? ADMIN_VIEWS : USER_VIEWS;
@@ -130,7 +130,8 @@
       acct.classList.add('hidden');
       return;
     }
-    const views = state.user.role === 'admin' ? ADMIN_VIEWS : USER_VIEWS;
+    const views = { ...(state.user.role === 'admin' ? ADMIN_VIEWS : USER_VIEWS) };
+    if (!state.config.racingMode) { delete views.horses; delete views.racing; }
     const active = currentView();
     nav.innerHTML = Object.entries(views)
       .map(([k, label]) => `<button data-view="${k}" class="${k === active ? 'active' : ''}">${label}</button>`).join('');
@@ -166,6 +167,7 @@
     const views = {
       matches: renderMatches, bets: renderMyBets, results: renderResults, history: renderHistory, account: renderAccount,
       users: renderUsers, allbets: renderAllBets, settle: renderSettle, feed: renderFeed,
+      horses: renderHorses, racing: renderRacingAdmin,
     };
     try {
       await views[view](main);
@@ -454,15 +456,20 @@
   }
 
   async function renderMyBets(main) {
-    const { bets } = await api('/bets');
+    const [{ bets: football }, { bets: horses }] = await Promise.all([
+      api('/bets'), state.config.racingMode ? api('/horse-bets') : { bets: [] }]);
     await refreshMe();
     renderChrome();
+    // Newest first across both sports; SQLite timestamps sort as text.
+    const bets = [...football.map((b) => ({ ...b, kind: 'football' })), ...horses.map((b) => ({ ...b, kind: 'horse' }))]
+      .sort((a, b) => (b.placedAt > a.placedAt ? 1 : b.placedAt < a.placedAt ? -1 : b.id - a.id));
+    const card = (b) => (b.kind === 'horse' ? horseBetCard(b) : betCard(b));
     const open = bets.filter((b) => b.status === 'open');
     const settled = bets.filter((b) => b.status !== 'open');
     main.innerHTML = `<h1>My bets</h1>
       ${!bets.length ? '<div class="empty-state">You haven\'t placed any bets yet.</div>' : ''}
-      ${open.length ? `<h2>Open (${open.length})</h2>${open.map((b) => betCard(b)).join('')}` : ''}
-      ${settled.length ? `<h2>Settled</h2>${settled.map((b) => betCard(b)).join('')}` : ''}`;
+      ${open.length ? `<h2>Open (${open.length})</h2>${open.map(card).join('')}` : ''}
+      ${settled.length ? `<h2>Settled</h2>${settled.map(card).join('')}` : ''}`;
   }
 
   async function renderResults(main) {
@@ -479,7 +486,7 @@
     const label = { credit: 'Credit from host', debit: 'Debit by host', bet: 'Bet placed', payout: 'Winnings', refund: 'Refund (void)' };
     return `<div class="card table-wrap"><table><thead><tr><th>Date</th><th>Type</th><th>Details</th><th class="num">Amount</th><th class="num">Balance</th></tr></thead><tbody>
       ${txs.map((t) => `<tr><td class="muted">${esc(sqlDate(t.createdAt))}</td><td>${esc(label[t.type] || t.type)}</td>
-        <td class="muted">${t.betId ? `Bet #${t.betId}` : ''}${t.note ? esc(t.note) : ''}</td>
+        <td class="muted">${t.betId ? `Bet #${t.betId}` : ''}${t.horseBetId ? `Horse bet #${t.horseBetId}` : ''}${t.note ? esc(t.note) : ''}</td>
         <td class="num ${t.amount > 0 ? 'pos' : 'neg'}">${t.amount > 0 ? '+' : ''}${fmt(t.amount)}</td><td class="num">${fmt(t.balanceAfter)}</td></tr>`).join('')}
     </tbody></table></div>`;
   }
@@ -648,6 +655,9 @@
         <p class="muted small">Leagues: ${s.leagues.map(esc).join(', ')}</p>
         ${s.oddsMode === 'demo' ? '<p class="muted small">Set <code>ODDS_API_KEY</code> on the server to switch to live bookmaker odds from The Odds API.</p>' : ''}
         ${s.lastError ? `<p class="neg small">Last error: ${esc(s.lastError)}</p>` : ''}
+        ${s.racingMode ? `<p>Horse racing feed: <strong>${s.racingMode === 'demo' ? 'Demo (Racing NRC not connected yet)' : esc(s.racingMode)}</strong>,
+          last refreshed <strong>${s.racingRefreshedAt ? esc(when(s.racingRefreshedAt)) : 'never'}</strong></p>
+          ${s.racingLastError ? `<p class="neg small">Racing feed error: ${esc(s.racingLastError)}</p>` : ''}` : ''}
         <button class="btn" id="refresh">Refresh odds &amp; results now</button>
         ${s.oddsMode === 'live' ? '<p class="muted small">Each refresh uses API credits (2 per league for odds).</p>' : ''}
       </div>`;
@@ -663,13 +673,235 @@
     };
   }
 
+
+  // ---------------------------------------------------------------- horse racing
+
+  const BET_TYPE_LABEL = { win: 'Win', place: 'Place', each_way: 'Each way' };
+  const ordinal = (n) => `${n}${['th', 'st', 'nd', 'rd'][(n % 100 > 10 && n % 100 < 14) || n % 10 > 3 ? 0 : n % 10]}`;
+  const price = (p) => (p ? odd(p) : '–');
+  function startsIn(iso) {
+    const mins = Math.round((Date.parse(iso) - Date.now()) / 60000);
+    if (mins <= 0) return 'Off';
+    if (mins < 60) return `${mins} min`;
+    return timeOnly(iso);
+  }
+  const raceTitle = (r) => `${esc(r.meeting)} · Race ${r.raceNo}`;
+  const placeTerms = (n) => (n ? `Place pays 1st–${ordinal(n)}` : 'Win only (no place betting)');
+
+  state.horseTab = 'upcoming';
+  state.races = [];
+
+  async function renderHorses(main) {
+    if (state.horseTab === 'results') {
+      const { races } = await api('/races/results');
+      return drawHorseResults(main, races);
+    }
+    main.innerHTML = '<div class="empty-state">Loading races…</div>';
+    const prev = Object.fromEntries(state.races.flatMap((r) => r.runners.map((u) => [`${r.id}|${u.number}`, u.winPrice])));
+    state.races = (await api('/races')).races;
+    drawRaces(main, prev);
+    state.pollTimer = setInterval(async () => {
+      if (currentView() !== 'horses' || state.horseTab !== 'upcoming' || document.hidden || !$('#modal').classList.contains('hidden')) return;
+      try {
+        const before = Object.fromEntries(state.races.flatMap((r) => r.runners.map((u) => [`${r.id}|${u.number}`, u.winPrice])));
+        state.races = (await api('/races')).races;
+        drawRaces(main, before);
+      } catch { /* try again next tick */ }
+    }, 30000);
+  }
+
+  function horseTabs() {
+    return `<div class="chips">${['upcoming', 'results'].map((t) =>
+      `<button class="chip ${state.horseTab === t ? 'active' : ''}" data-horse-tab="${t}">${t === 'upcoming' ? 'Race cards' : 'Results'}</button>`).join('')}</div>`;
+  }
+
+  function drawRaces(main, prev = {}) {
+    let html = `${horseTabs()}<p class="muted small">Tote betting, like at the track: prices move as money comes in, and winning bets are paid the official final dividend.</p>`;
+    if (!state.races.length) html += '<div class="empty-state">No races open for betting right now.</div>';
+    let day = '';
+    for (const r of state.races) {
+      const d = dayLabel(r.postTime);
+      if (d !== day) { html += `<h2>${esc(d)}</h2>`; day = d; }
+      html += `<div class="race card">
+        <div class="race-head"><div><strong>${raceTitle(r)}</strong> · ${esc(timeOnly(r.postTime))}
+          <div class="muted small">${esc(r.name || '')}${r.distance ? ` · ${esc(r.distance)}` : ''} · ${placeTerms(r.placesPaid)}</div></div>
+          <span class="countdown">${startsIn(r.postTime)}</span></div>
+        <div class="runner runner-head"><span>#</span><span>Horse / jockey</span><span>Win</span><span>Place</span></div>
+        ${r.runners.map((u) => {
+          const key = `${r.id}|${u.number}`;
+          const move = prev[key] === undefined || prev[key] === u.winPrice ? '' : u.winPrice > prev[key] ? 'up' : 'down';
+          return `<div class="runner ${u.withdrawn ? 'withdrawn' : ''}">
+            <span class="no">${u.number}</span>
+            <div class="horse"><div class="t"><strong>${esc(u.horse)}</strong>${u.withdrawn ? ' <span class="badge void">withdrawn</span>' : ''}</div>
+              <div class="muted small">${esc([u.jockey, u.weight, u.draw && `draw ${u.draw}`, u.form && `form ${u.form}`].filter(Boolean).join(' · '))}</div></div>
+            ${u.withdrawn ? '<span></span><span></span>' : `
+              <button class="odd ${move}" data-race="${esc(r.id)}" data-runner="${u.number}" data-type="win" ${u.winPrice ? '' : 'disabled'}>${price(u.winPrice)}</button>
+              <button class="odd" data-race="${esc(r.id)}" data-runner="${u.number}" data-type="place" ${u.placePrice ? '' : 'disabled'}>${price(u.placePrice)}</button>`}
+          </div>`;
+        }).join('')}
+      </div>`;
+    }
+    main.innerHTML = html;
+  }
+
+  function drawHorseResults(main, races) {
+    main.innerHTML = `${horseTabs()}${races.length ? races.map((r) => {
+      const placed = r.runners.filter((u) => u.position).sort((a, b) => a.position - b.position).slice(0, Math.max(3, r.placesPaid));
+      return `<div class="race card">
+        <div class="race-head"><div><strong>${raceTitle(r)}</strong> · ${esc(when(r.postTime))}
+          <div class="muted small">${esc(r.name || '')}${r.distance ? ` · ${esc(r.distance)}` : ''}</div></div>
+          ${r.status === 'abandoned' ? '<span class="badge void">abandoned</span>' : ''}</div>
+        ${r.status === 'abandoned' ? '<p class="muted">All bets refunded.</p>' : `<div class="table-wrap"><table>
+          <thead><tr><th>Pos</th><th>Horse</th><th class="num">Win div.</th><th class="num">Place div.</th></tr></thead><tbody>
+          ${placed.map((u) => `<tr><td>${ordinal(u.position)}</td><td>${u.number}. ${esc(u.horse)} <span class="muted small">${esc(u.jockey || '')}</span></td>
+            <td class="num">${u.winDividend ? odd(u.winDividend) : ''}</td><td class="num">${u.placeDividend ? odd(u.placeDividend) : ''}</td></tr>`).join('')}
+          </tbody></table></div>
+          ${r.runners.some((u) => u.withdrawn) ? `<p class="muted small">Withdrawn: ${r.runners.filter((u) => u.withdrawn).map((u) => `${u.number}. ${esc(u.horse)}`).join(', ')}</p>` : ''}`}
+      </div>`;
+    }).join('') : '<div class="empty-state">No race results in the last few days.</div>'}`;
+  }
+
+  $('#view').addEventListener('click', (e) => {
+    const tab = e.target.closest('[data-horse-tab]');
+    if (tab) {
+      state.horseTab = tab.dataset.horseTab;
+      render();
+      return;
+    }
+    const btn = e.target.closest('.odd[data-race]');
+    if (!btn || btn.disabled) return;
+    const race = state.races.find((r) => r.id === btn.dataset.race);
+    const runner = race?.runners.find((u) => u.number === Number(btn.dataset.runner));
+    if (race && runner) openHorseBet(race, runner, btn.dataset.type);
+  });
+
+  function openHorseBet(race, runner, initialType) {
+    let type = initialType;
+    const types = race.placesPaid ? ['win', 'place', 'each_way'] : ['win'];
+    modal(`
+      <h3>${runner.number}. ${esc(runner.horse)}</h3>
+      <p class="muted small">${raceTitle(race)} · ${esc(timeOnly(race.postTime))} · ${esc(runner.jockey || '')}<br>${placeTerms(race.placesPaid)}</p>
+      <form>
+        <div class="tabs" id="hb-types">${types.map((t) => `<button type="button" data-t="${t}">${BET_TYPE_LABEL[t]}</button>`).join('')}</div>
+        <label for="hb-stake">Stake (${esc(state.config.currency)})</label>
+        <input id="hb-stake" name="stake" type="number" inputmode="decimal" step="0.01" min="${state.config.minStake}" max="${state.config.maxStake}" required>
+        <div class="quick">${[5, 10, 25, 50].map((v) => `<button type="button" class="btn ghost small" data-q="${v}">${v}</button>`).join('')}</div>
+        <div id="hb-summary"></div>
+        <p class="muted small">Tote bet: the price shown is the current guide. If the horse wins or places you're paid the official final dividend, which can be higher or lower. Withdrawn horse or abandoned race = stake refunded.</p>
+        <div class="error"></div>
+        <div class="modal-actions"><button type="button" class="btn ghost" data-close>Cancel</button><button class="btn" type="submit">Place bet</button></div>
+      </form>`, async (f) => {
+      const res = await api('/horse-bets', { raceId: race.id, runnerNo: runner.number, betType: type, stake: Number(f.stake) });
+      state.user.balance = res.balance;
+      renderChrome();
+      toast(`${BET_TYPE_LABEL[type]} bet on ${runner.horse} placed — good luck!`);
+    });
+    const stakeEl = $('#hb-stake');
+    const update = () => {
+      document.querySelectorAll('#hb-types button').forEach((b) => b.classList.toggle('active', b.dataset.t === type));
+      const stake = Number(stakeEl.value) || 0;
+      const rows = [];
+      if (type === 'each_way') {
+        rows.push(['Total stake', fmt(stake * 2), '']);
+        rows.push(['If it wins (guide)', fmt(stake * (runner.winPrice + runner.placePrice)), 'pos']);
+        rows.push(['If it only places (guide)', fmt(stake * runner.placePrice), 'pos']);
+      } else {
+        const p = type === 'win' ? runner.winPrice : runner.placePrice;
+        rows.push([`Current ${type} price`, odd(p), '']);
+        rows.push(['Estimated return', fmt(stake * p), 'pos']);
+      }
+      $('#hb-summary').innerHTML = rows.map(([k, v, c]) => `<div class="summary"><span>${k}</span><strong class="${c}">${v}</strong></div>`).join('');
+    };
+    $('#hb-types').onclick = (e) => { if (e.target.dataset.t) { type = e.target.dataset.t; update(); } };
+    document.querySelectorAll('[data-q]').forEach((b) => { b.onclick = () => { stakeEl.value = b.dataset.q; update(); }; });
+    stakeEl.oninput = update;
+    update();
+  }
+
+  function horseBetCard(b, showUser = false) {
+    const outcome = b.status === 'void'
+      ? (b.raceStatus === 'abandoned' ? 'Race abandoned — refunded' : 'Withdrawn — refunded')
+      : b.position ? `Finished ${ordinal(b.position)}${b.dividend ? ` · dividend ${odd(b.dividend)}` : ''}` : '';
+    return `<div class="card bet">
+      <div class="bet-top"><div><strong>🐎 ${BET_TYPE_LABEL[b.betType]}</strong> <span class="muted small">#H${b.id}${showUser ? ` · ${esc(b.username)}` : ''} · ${esc(sqlDate(b.placedAt))}</span></div>
+        <span class="badge ${b.status}">${b.status}</span></div>
+      <div class="leg"><div><strong>${b.runnerNo}. ${esc(b.horse)}</strong>
+        <div class="muted small">${esc(b.meeting)} · Race ${b.raceNo}${b.raceName ? ` · ${esc(b.raceName)}` : ''} · ${esc(when(b.postTime))}</div></div>
+        <div class="r muted">${esc(outcome)}</div></div>
+      <div class="bet-foot"><span>Stake <strong>${fmt(b.stake)}</strong></span>
+        ${b.priceAtBet ? `<span>Price when placed <strong>${odd(b.priceAtBet)}</strong></span>` : ''}
+        ${b.status === 'open' ? '<span>Pays the final dividend</span>' : `<span>Returned <strong class="${b.payout > 0 ? 'pos' : ''}">${fmt(b.payout)}</strong></span>`}</div>
+    </div>`;
+  }
+
+  async function renderRacingAdmin(main) {
+    const [{ pending, upcoming }, { bets }] = await Promise.all([api('/admin/races'), api('/admin/horse-bets?status=open')]);
+    const all = [...pending, ...upcoming];
+    main.innerHTML = `<h1>Racing</h1>
+      <p class="muted">Results and dividends normally arrive from the racing feed and bets settle by themselves. Use this page when a result is late or wrong, a horse is withdrawn, or a race is abandoned.</p>
+      <h2>Awaiting result (${pending.length})</h2>
+      ${pending.length ? `<div class="card table-wrap"><table><thead><tr><th>Off</th><th>Race</th><th class="num">Open bets</th><th></th></tr></thead><tbody>
+        ${pending.map((r) => `<tr><td class="muted">${esc(when(r.postTime))}</td><td><strong>${raceTitle(r)}</strong><div class="muted small">${esc(r.name || '')}</div></td>
+          <td class="num">${r.openBets}</td><td><div class="actions"><button class="btn small" data-result="${esc(r.id)}">Enter result</button>
+          <button class="btn danger small" data-abandon="${esc(r.id)}">Abandon</button></div></td></tr>`).join('')}
+      </tbody></table></div>` : '<div class="empty-state">Nothing waiting for a result.</div>'}
+      <h2>Upcoming</h2>
+      ${upcoming.length ? `<div class="card table-wrap"><table><thead><tr><th>Off</th><th>Race</th><th class="num">Open bets</th><th></th></tr></thead><tbody>
+        ${upcoming.map((r) => `<tr><td class="muted">${esc(when(r.postTime))}</td><td><strong>${raceTitle(r)}</strong><div class="muted small">${esc(r.name || '')} · ${r.runners.length} runners</div></td>
+          <td class="num">${r.openBets}</td><td><div class="actions"><button class="btn ghost small" data-withdraw="${esc(r.id)}">Withdraw a horse</button>
+          <button class="btn danger small" data-abandon="${esc(r.id)}">Abandon</button></div></td></tr>`).join('')}
+      </tbody></table></div>` : '<div class="empty-state">No upcoming races.</div>'}
+      <h2>Open horse bets (${bets.length})</h2>
+      ${bets.length ? bets.map((b) => horseBetCard(b, true)).join('') : '<div class="empty-state">No open horse bets.</div>'}`;
+
+    const byId = Object.fromEntries(all.map((r) => [r.id, r]));
+    const done = (r) => { toast(`${r.settledBets} bet(s) settled`); render(); };
+    main.querySelectorAll('[data-abandon]').forEach((b) => {
+      b.onclick = () => {
+        const r = byId[b.dataset.abandon];
+        modal(`<h3>Abandon ${raceTitle(r)}?</h3><p class="muted">Every bet on this race is refunded.</p>
+          <form><div class="error"></div><div class="modal-actions"><button type="button" class="btn ghost" data-close>Cancel</button><button class="btn" type="submit">Abandon race</button></div></form>`,
+        async () => done(await api(`/admin/races/${encodeURIComponent(r.id)}/abandon`, {})));
+      };
+    });
+    main.querySelectorAll('[data-withdraw]').forEach((b) => {
+      b.onclick = () => {
+        const r = byId[b.dataset.withdraw];
+        modal(`<h3>Withdraw a horse · ${raceTitle(r)}</h3><p class="muted small">Bets on the withdrawn horse are refunded straight away.</p>
+          <form><label>Horse</label><select name="no">${r.runners.filter((u) => !u.withdrawn).map((u) => `<option value="${u.number}">${u.number}. ${esc(u.horse)}</option>`).join('')}</select>
+          <div class="error"></div><div class="modal-actions"><button type="button" class="btn ghost" data-close>Cancel</button><button class="btn" type="submit">Withdraw</button></div></form>`,
+        async (f) => done(await api(`/admin/races/${encodeURIComponent(r.id)}/runners/${f.no}/withdraw`, {})));
+      };
+    });
+    main.querySelectorAll('[data-result]').forEach((b) => {
+      b.onclick = () => {
+        const r = byId[b.dataset.result];
+        const runners = r.runners.filter((u) => !u.withdrawn);
+        modal(`<h3>Result · ${raceTitle(r)}</h3>
+          <p class="muted small">Enter the finishing positions you know, the official win dividend for the winner and place dividends for the placed horses (${placeTerms(r.placesPaid).toLowerCase()}). Dividends are per 1 credit, stake included.</p>
+          <form><div class="table-wrap"><table><thead><tr><th>Horse</th><th>Pos</th><th>Win div.</th><th>Place div.</th></tr></thead><tbody>
+          ${runners.map((u) => `<tr><td>${u.number}. ${esc(u.horse)}</td>
+            <td><input name="pos_${u.number}" type="number" min="1" class="mini"></td>
+            <td><input name="win_${u.number}" type="number" step="0.01" min="1" class="mini"></td>
+            <td><input name="place_${u.number}" type="number" step="0.01" min="1" class="mini" ${r.placesPaid ? '' : 'disabled'}></td></tr>`).join('')}
+          </tbody></table></div>
+          <div class="error"></div><div class="modal-actions"><button type="button" class="btn ghost" data-close>Cancel</button><button class="btn" type="submit">Save result &amp; settle</button></div></form>`,
+        async (f) => done(await api(`/admin/races/${encodeURIComponent(r.id)}/result`, {
+          runners: runners.map((u) => ({ number: u.number, position: f[`pos_${u.number}`], winDividend: f[`win_${u.number}`], placeDividend: f[`place_${u.number}`] })),
+        })));
+      };
+    });
+  }
+
   // ---------------------------------------------------------------- boot
 
   (async () => {
     state.config = await api('/config');
     document.title = state.config.siteName;
     $('#site-name').textContent = state.config.siteName;
-    $('#demo-banner').classList.toggle('hidden', state.config.oddsMode !== 'demo');
+    const demo = [state.config.oddsMode === 'demo' && 'football odds', state.config.racingMode === 'demo' && 'horse races'].filter(Boolean);
+    $('#demo-banner').textContent = `Demo data: ${demo.join(' and ')} are simulated until a live feed is connected.`;
+    $('#demo-banner').classList.toggle('hidden', !demo.length);
     await refreshMe();
     render();
   })();

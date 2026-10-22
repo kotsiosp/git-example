@@ -5,25 +5,11 @@ const path = require('node:path');
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const { settleAll } = require('./settle');
+const { settleHorseBets } = require('./racing');
+const { racingRoutes } = require('./racingRoutes');
+const { HttpError, toCents, fromCents, requireUser, requireAdmin } = require('./util');
 
 const USERNAME_RE = /^[A-Za-z0-9_.-]{3,32}$/;
-
-class HttpError extends Error {
-  constructor(status, message, extra) {
-    super(message);
-    this.status = status;
-    this.extra = extra;
-  }
-}
-
-const toCents = (value, label = 'Amount') => {
-  const n = Number(value);
-  if (!Number.isFinite(n) || Math.abs(Math.round(n * 100) - n * 100) > 1e-6) {
-    throw new HttpError(400, `${label} must be a number with at most 2 decimals`);
-  }
-  return Math.round(n * 100);
-};
-const fromCents = (c) => c / 100;
 
 function publicUser(u) {
   return { id: u.id, username: u.username, role: u.role, balance: fromCents(u.balance), active: !!u.active, createdAt: u.created_at };
@@ -35,7 +21,7 @@ function validatePassword(pw) {
   }
 }
 
-function createApp({ db, config, odds, now = () => Date.now() }) {
+function createApp({ db, config, odds, racing, now = () => Date.now() }) {
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', 1);
@@ -87,10 +73,6 @@ function createApp({ db, config, odds, now = () => Date.now() }) {
     next();
   });
 
-  const requireUser = (req, res, next) => (req.user ? next() : res.status(401).json({ error: 'Please log in' }));
-  const requireAdmin = (req, res, next) =>
-    (req.user?.role === 'admin' ? next() : res.status(403).json({ error: 'Admin only' }));
-
   const loginAttempts = new Map();
   function checkRateLimit(key) {
     const windowMs = 15 * 60 * 1000;
@@ -132,7 +114,10 @@ function createApp({ db, config, odds, now = () => Date.now() }) {
   });
 
   app.get('/api/config', (req, res) => {
-    res.json({ siteName: config.siteName, currency: config.currency, minStake: config.minStake, maxStake: config.maxStake, maxLegs: config.maxLegs, oddsMode: odds.mode });
+    res.json({
+      siteName: config.siteName, currency: config.currency, minStake: config.minStake, maxStake: config.maxStake,
+      maxLegs: config.maxLegs, oddsMode: odds.mode, racingMode: racing ? racing.mode : null,
+    });
   });
 
   app.get('/api/me', requireUser, (req, res) => res.json({ user: publicUser(req.user) }));
@@ -277,7 +262,8 @@ function createApp({ db, config, odds, now = () => Date.now() }) {
 
   function transactions(userId) {
     return db.prepare('SELECT * FROM transactions WHERE user_id = ? ORDER BY id DESC LIMIT 300').all(userId).map((t) => ({
-      id: t.id, amount: fromCents(t.amount), balanceAfter: fromCents(t.balance_after), type: t.type, betId: t.bet_id, note: t.note, createdAt: t.created_at,
+      id: t.id, amount: fromCents(t.amount), balanceAfter: fromCents(t.balance_after), type: t.type, betId: t.bet_id,
+      horseBetId: t.horse_bet_id, note: t.note, createdAt: t.created_at,
     }));
   }
 
@@ -296,8 +282,10 @@ function createApp({ db, config, odds, now = () => Date.now() }) {
 
   admin.get('/users', (req, res) => {
     const rows = db.prepare(`SELECT u.*,
-        (SELECT COUNT(*) FROM bets b WHERE b.user_id = u.id) AS bet_count,
-        (SELECT COALESCE(SUM(stake), 0) FROM bets b WHERE b.user_id = u.id AND b.status = 'open') AS open_stake
+        (SELECT COUNT(*) FROM bets b WHERE b.user_id = u.id)
+          + (SELECT COUNT(*) FROM horse_bets h WHERE h.user_id = u.id) AS bet_count,
+        (SELECT COALESCE(SUM(stake), 0) FROM bets b WHERE b.user_id = u.id AND b.status = 'open')
+          + (SELECT COALESCE(SUM(stake), 0) FROM horse_bets h WHERE h.user_id = u.id AND h.status = 'open') AS open_stake
       FROM users u WHERE role = 'user' ORDER BY u.username`).all();
     res.json({ users: rows.map((u) => ({ ...publicUser(u), betCount: u.bet_count, openStake: fromCents(u.open_stake) })) });
   });
@@ -393,7 +381,11 @@ function createApp({ db, config, odds, now = () => Date.now() }) {
       lastError: db.getMeta('odds_last_error'),
       upcomingEvents: count(`SELECT COUNT(*) AS n FROM events WHERE commence_time > '${new Date(now()).toISOString()}' AND completed = 0 AND voided = 0`),
       users: count("SELECT COUNT(*) AS n FROM users WHERE role = 'user'"),
-      openBets: count("SELECT COUNT(*) AS n FROM bets WHERE status = 'open'"),
+      openBets: count("SELECT COUNT(*) AS n FROM bets WHERE status = 'open'")
+        + count("SELECT COUNT(*) AS n FROM horse_bets WHERE status = 'open'"),
+      racingMode: racing ? racing.mode : null,
+      racingRefreshedAt: db.getMeta('racing_refreshed_at'),
+      racingLastError: db.getMeta('racing_last_error'),
       creditsInCirculation: fromCents(count("SELECT COALESCE(SUM(balance), 0) AS n FROM users WHERE role = 'user'")),
     });
   });
@@ -401,11 +393,13 @@ function createApp({ db, config, odds, now = () => Date.now() }) {
   admin.post('/refresh', async (req, res) => {
     const result = await odds.refreshOdds();
     await odds.refreshScores();
-    const settledBets = settleAll(db);
+    if (racing) await racing.refresh();
+    const settledBets = settleAll(db) + settleHorseBets(db);
     res.json({ errors: result.errors, settledBets });
   });
 
   app.use('/api/admin', admin);
+  if (racing) app.use('/api', racingRoutes({ db, config, now }));
 
   app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 

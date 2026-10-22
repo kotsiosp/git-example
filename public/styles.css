@@ -198,3 +198,20 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .modal-card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 20px; width: 100%; max-width: 440px; max-height: 90vh; overflow: auto; }
 .modal-card h3 { margin: 0 0 8px; }
 .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 18px; }
+
+/* horse racing */
+.race { margin-bottom: 12px; padding: 0; overflow: hidden; }
+.race-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 12px 14px; background: var(--panel-2); border-bottom: 1px solid var(--line); }
+.race > p, .race > .table-wrap { padding: 0 14px; }
+.countdown { font-weight: 800; color: var(--warn); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.runner { display: grid; grid-template-columns: 28px 1fr 64px 64px; gap: 8px; align-items: center; padding: 8px 14px; border-bottom: 1px solid var(--line); }
+.runner:last-child { border-bottom: 0; }
+.runner-head { font-size: 12px; color: var(--muted); font-weight: 600; padding-top: 6px; padding-bottom: 6px; }
+.runner-head span:nth-child(n+3) { text-align: center; }
+.runner .no { font-weight: 800; color: var(--muted); text-align: center; }
+.runner .horse { min-width: 0; }
+.runner .horse .t, .runner .horse .small { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.runner.withdrawn .horse strong { text-decoration: line-through; color: var(--muted); }
+.odd:disabled { cursor: default; color: var(--muted); }
+input.mini { width: 80px; padding: 5px 8px; }
+@media (max-width: 640px) { .runner { grid-template-columns: 22px 1fr 54px 54px; padding: 8px 10px; } }

@@ -76,11 +76,60 @@ CREATE TABLE IF NOT EXISTS transactions (
   balance_after INTEGER NOT NULL,
   type TEXT NOT NULL,                          -- credit | debit | bet | payout | refund
   bet_id INTEGER,
+  horse_bet_id INTEGER,
   note TEXT,
   by_user_id INTEGER,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS tx_user ON transactions(user_id, id);
+
+CREATE TABLE IF NOT EXISTS races (
+  id TEXT PRIMARY KEY,
+  meeting TEXT NOT NULL,                       -- e.g. Nicosia
+  race_no INTEGER NOT NULL,
+  name TEXT,
+  post_time TEXT NOT NULL,                     -- ISO 8601 UTC
+  distance TEXT,
+  places_paid INTEGER NOT NULL DEFAULT 3,      -- 0 = no place betting
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'result', 'abandoned')),
+  prices_updated_at TEXT
+);
+CREATE INDEX IF NOT EXISTS races_time ON races(post_time);
+
+CREATE TABLE IF NOT EXISTS runners (
+  race_id TEXT NOT NULL REFERENCES races(id) ON DELETE CASCADE,
+  number INTEGER NOT NULL,
+  horse TEXT NOT NULL,
+  jockey TEXT,
+  trainer TEXT,
+  weight TEXT,
+  draw INTEGER,
+  form TEXT,
+  win_price REAL,                              -- live tote prices, moving until the off
+  place_price REAL,
+  withdrawn INTEGER NOT NULL DEFAULT 0,
+  finish_pos INTEGER,
+  win_dividend REAL,                           -- official final payouts per 1 credit staked
+  place_dividend REAL,
+  PRIMARY KEY (race_id, number)
+);
+
+CREATE TABLE IF NOT EXISTS horse_bets (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  race_id TEXT NOT NULL REFERENCES races(id),
+  runner_no INTEGER NOT NULL,
+  bet_type TEXT NOT NULL CHECK (bet_type IN ('win', 'place')),
+  stake INTEGER NOT NULL,
+  price_at_bet REAL,                           -- for information only; bets pay the final dividend
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'won', 'lost', 'void')),
+  dividend REAL,
+  payout INTEGER NOT NULL DEFAULT 0,
+  placed_at TEXT NOT NULL DEFAULT (datetime('now')),
+  settled_at TEXT
+);
+CREATE INDEX IF NOT EXISTS horse_bets_user ON horse_bets(user_id, id);
+CREATE INDEX IF NOT EXISTS horse_bets_race ON horse_bets(race_id, status);
 
 CREATE TABLE IF NOT EXISTS meta (
   key TEXT PRIMARY KEY,
@@ -93,6 +142,10 @@ function open(file) {
   const db = new DatabaseSync(file);
   db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
   db.exec(SCHEMA);
+  // Databases created before horse racing was added lack this column.
+  if (!db.prepare('PRAGMA table_info(transactions)').all().some((c) => c.name === 'horse_bet_id')) {
+    db.exec('ALTER TABLE transactions ADD COLUMN horse_bet_id INTEGER');
+  }
 
   db.tx = (fn) => {
     db.exec('BEGIN IMMEDIATE');
@@ -112,14 +165,14 @@ function open(file) {
       .run(key, value == null ? null : String(value));
 
   // Moves money and writes the ledger entry. Must run inside db.tx().
-  db.adjustBalance = ({ userId, amount, type, betId = null, note = null, byUserId = null }) => {
+  db.adjustBalance = ({ userId, amount, type, betId = null, horseBetId = null, note = null, byUserId = null }) => {
     const user = db.prepare('SELECT balance FROM users WHERE id = ?').get(userId);
     if (!user) throw Object.assign(new Error('User not found'), { status: 404 });
     const after = user.balance + amount;
     if (after < 0) throw Object.assign(new Error('Insufficient balance'), { status: 400 });
     db.prepare('UPDATE users SET balance = ? WHERE id = ?').run(after, userId);
-    db.prepare(`INSERT INTO transactions (user_id, amount, balance_after, type, bet_id, note, by_user_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?)`).run(userId, amount, after, type, betId, note, byUserId);
+    db.prepare(`INSERT INTO transactions (user_id, amount, balance_after, type, bet_id, horse_bet_id, note, by_user_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(userId, amount, after, type, betId, horseBetId, note, byUserId);
     return after;
   };
 

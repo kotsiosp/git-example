@@ -5,6 +5,7 @@ const { open } = require('./db');
 const { createApp, ensureAdmin } = require('./app');
 const { createOddsService } = require('./odds');
 const { settleAll } = require('./settle');
+const { createRacingService, settleHorseBets } = require('./racing');
 
 const db = open(config.dbFile);
 const created = ensureAdmin(db, config);
@@ -33,5 +34,17 @@ safe(async () => { await oddsTick(); await scoresTick(); })();
 setInterval(safe(oddsTick), oddsEvery);
 setInterval(safe(scoresTick), scoresEvery);
 
-const app = createApp({ db, config, odds });
+const racing = config.racingEnabled ? createRacingService(db, config) : null;
+if (racing) {
+  console.log(`Racing feed: ${racing.mode === 'demo' ? 'DEMO (Racing NRC feed not connected yet)' : racing.mode}`);
+  const racingTick = async () => {
+    await racing.refresh();
+    const n = settleHorseBets(db);
+    if (n) console.log(`Settled ${n} horse bet(s)`);
+  };
+  safe(racingTick)();
+  setInterval(safe(racingTick), config.racingRefreshSeconds * 1000);
+}
+
+const app = createApp({ db, config, odds, racing });
 app.listen(config.port, () => console.log(`${config.siteName} listening on http://localhost:${config.port}`));

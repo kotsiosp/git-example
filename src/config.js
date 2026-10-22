@@ -31,6 +31,10 @@ module.exports = {
   oddsRefreshMinutes: Number(process.env.ODDS_REFRESH_MINUTES || 60),
   scoresRefreshMinutes: Number(process.env.SCORES_REFRESH_MINUTES || 30),
 
+  // Cyprus horse racing. Only the demo feed exists until the Racing NRC feed is connected.
+  racingEnabled: process.env.RACING_ENABLED !== 'false',
+  racingRefreshSeconds: Number(process.env.RACING_REFRESH_SECONDS || 60),
+
   minStake: Number(process.env.MIN_STAKE || 1),
   maxStake: Number(process.env.MAX_STAKE || 10000),
   maxLegs: Number(process.env.MAX_LEGS || 12),
