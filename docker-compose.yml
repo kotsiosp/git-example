@@ -1,0 +1,28 @@
+# Runs the site plus Caddy, which gets and renews a free HTTPS certificate for your domain.
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      SECURE_COOKIES: "true"
+    volumes:
+      - playbet-data:/app/data
+
+  caddy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:?Set DOMAIN in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    depends_on:
+      - app
+
+volumes:
+  playbet-data:
+  caddy-data:
