@@ -15,25 +15,27 @@ if (created) {
   if (created.password) console.log(`  Generated password: ${created.password}  (change it after logging in)`);
 }
 
-const odds = createOddsService(db, config);
-console.log(`Odds feed: ${odds.mode === 'live' ? 'LIVE (The Odds API)' : 'DEMO (set ODDS_API_KEY for live odds)'}`);
-
-async function oddsTick() {
-  await odds.refreshOdds();
-}
-async function scoresTick() {
-  await odds.refreshScores();
-  const n = settleAll(db);
-  if (n) console.log(`Settled ${n} bet(s)`);
-}
+const odds = config.footballEnabled ? createOddsService(db, config) : null;
 const safe = (fn) => () => fn().catch((err) => console.error(err));
-
-// Demo fixtures cost nothing, so they refresh every few minutes.
-const oddsEvery = (odds.mode === 'demo' ? 5 : config.oddsRefreshMinutes) * 60 * 1000;
-const scoresEvery = (odds.mode === 'demo' ? 5 : config.scoresRefreshMinutes) * 60 * 1000;
-safe(async () => { await oddsTick(); await scoresTick(); })();
-setInterval(safe(oddsTick), oddsEvery);
-setInterval(safe(scoresTick), scoresEvery);
+if (odds) {
+  console.log(`Odds feed: ${odds.mode === 'live' ? 'LIVE (The Odds API)' : 'DEMO (set ODDS_API_KEY for live odds)'}`);
+  const oddsTick = async () => {
+    await odds.refreshOdds();
+  };
+  const scoresTick = async () => {
+    await odds.refreshScores();
+    const n = settleAll(db);
+    if (n) console.log(`Settled ${n} bet(s)`);
+  };
+  // Demo fixtures cost nothing, so they refresh every few minutes.
+  const oddsEvery = (odds.mode === 'demo' ? 5 : config.oddsRefreshMinutes) * 60 * 1000;
+  const scoresEvery = (odds.mode === 'demo' ? 5 : config.scoresRefreshMinutes) * 60 * 1000;
+  safe(async () => { await oddsTick(); await scoresTick(); })();
+  setInterval(safe(oddsTick), oddsEvery);
+  setInterval(safe(scoresTick), scoresEvery);
+} else {
+  console.log('Football: off (set FOOTBALL_ENABLED=true to turn it on)');
+}
 
 const racingProvider = config.racingSource === 'nrc' ? createNrcProvider(config) : undefined;
 const racing = config.racingEnabled ? createRacingService(db, config, { provider: racingProvider }) : null;

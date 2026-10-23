@@ -103,10 +103,18 @@
   // ---------------------------------------------------------------- routing
 
   const USER_VIEWS = { matches: 'Football', horses: 'Horses', bets: 'My bets', results: 'Results', history: 'Statement', account: 'Account' };
-  const ADMIN_VIEWS = { users: 'Players', allbets: 'All bets', settle: 'Settlement', racing: 'Racing', feed: 'Odds feed', results: 'Results', account: 'Account' };
+  const ADMIN_VIEWS = { users: 'Players', allbets: 'All bets', settle: 'Settlement', racing: 'Racing', feed: 'Feeds', results: 'Results', account: 'Account' };
+
+  // The views this user can open, minus any sport the site has switched off.
+  function availableViews() {
+    const views = { ...(state.user?.role === 'admin' ? ADMIN_VIEWS : USER_VIEWS) };
+    if (!state.config.racingMode) { delete views.horses; delete views.racing; }
+    if (!state.config.oddsMode) { delete views.matches; delete views.results; delete views.allbets; delete views.settle; }
+    return views;
+  }
 
   function currentView() {
-    const views = state.user?.role === 'admin' ? ADMIN_VIEWS : USER_VIEWS;
+    const views = availableViews();
     const v = location.hash.replace(/^#\/?/, '');
     return views[v] ? v : Object.keys(views)[0];
   }
@@ -130,8 +138,7 @@
       acct.classList.add('hidden');
       return;
     }
-    const views = { ...(state.user.role === 'admin' ? ADMIN_VIEWS : USER_VIEWS) };
-    if (!state.config.racingMode) { delete views.horses; delete views.racing; }
+    const views = availableViews();
     const active = currentView();
     nav.innerHTML = Object.entries(views)
       .map(([k, label]) => `<button data-view="${k}" class="${k === active ? 'active' : ''}">${label}</button>`).join('');
@@ -528,7 +535,7 @@
         <div class="card stat"><div class="v">${status.users}</div><div class="k">Players</div></div>
         <div class="card stat"><div class="v">${fmt(status.creditsInCirculation)}</div><div class="k">${esc(state.config.currency)} in balances</div></div>
         <div class="card stat"><div class="v">${status.openBets}</div><div class="k">Open bets</div></div>
-        <div class="card stat"><div class="v">${status.upcomingEvents}</div><div class="k">Upcoming matches</div></div>
+        ${state.config.oddsMode ? `<div class="card stat"><div class="v">${status.upcomingEvents}</div><div class="k">Upcoming matches</div></div>` : ''}
       </div>
       <div class="bet-top"><h1>Players</h1><button class="btn" id="new-user">+ Open account</button></div>
       ${users.length ? `<div class="card table-wrap"><table><thead><tr><th>Username</th><th class="num">Balance</th><th class="num">In open bets</th><th class="num">Bets</th><th>Status</th><th></th></tr></thead><tbody>
@@ -643,7 +650,8 @@
 
   async function renderFeed(main) {
     const s = await api('/admin/status');
-    main.innerHTML = `<h1>Odds feed</h1>
+    const football = s.oddsMode ? `
+      <h2>Football</h2>
       <div class="stats">
         <div class="card stat"><div class="v">${s.oddsMode === 'live' ? 'Live' : 'Demo'}</div><div class="k">Mode</div></div>
         <div class="card stat"><div class="v">${s.apiRequestsRemaining ?? '—'}</div><div class="k">API credits left</div></div>
@@ -655,12 +663,18 @@
         <p class="muted small">Leagues: ${s.leagues.map(esc).join(', ')}</p>
         ${s.oddsMode === 'demo' ? '<p class="muted small">Set <code>ODDS_API_KEY</code> on the server to switch to live bookmaker odds from The Odds API.</p>' : ''}
         ${s.lastError ? `<p class="neg small">Last error: ${esc(s.lastError)}</p>` : ''}
-        ${s.racingMode ? `<p>Horse racing feed: <strong>${s.racingMode === 'demo' ? 'Demo (simulated races)' : s.racingMode === 'nrc' ? 'Racing NRC (live)' : esc(s.racingMode)}</strong>,
-          last refreshed <strong>${s.racingRefreshedAt ? esc(when(s.racingRefreshedAt)) : 'never'}</strong></p>
-          ${s.racingLastError ? `<p class="neg small">Racing feed error: ${esc(s.racingLastError)}</p>` : ''}` : ''}
-        <button class="btn" id="refresh">Refresh odds &amp; results now</button>
-        ${s.oddsMode === 'live' ? '<p class="muted small">Each refresh uses API credits (2 per league for odds).</p>' : ''}
-      </div>`;
+        ${s.oddsMode === 'live' ? '<p class="muted small">Refreshing football uses API credits (2 per league).</p>' : ''}
+      </div>` : '';
+    const horses = s.racingMode ? `
+      <h2>Horse racing</h2>
+      <div class="card">
+        <p>Feed: <strong>${s.racingMode === 'demo' ? 'Demo (simulated races)' : s.racingMode === 'nrc' ? 'Racing NRC (live, Nicosia)' : esc(s.racingMode)}</strong><br>
+        Last refreshed: <strong>${s.racingRefreshedAt ? esc(when(s.racingRefreshedAt)) : 'never'}</strong></p>
+        ${s.racingMode === 'nrc' ? '<p class="muted small">Read on Cyprus race days only (Wednesday and Sunday).</p>' : ''}
+        ${s.racingLastError ? `<p class="neg small">Racing feed error: ${esc(s.racingLastError)}</p>` : ''}
+      </div>` : '';
+    main.innerHTML = `<h1>Feeds</h1>${horses}${football}
+      <p><button class="btn" id="refresh">Refresh now</button></p>`;
     $('#refresh').onclick = async (e) => {
       e.target.disabled = true;
       try {
@@ -899,6 +913,7 @@
     state.config = await api('/config');
     document.title = state.config.siteName;
     $('#site-name').textContent = state.config.siteName;
+    if (!state.config.oddsMode && state.config.racingMode) $('.brand-ball').textContent = '🐎';
     const demo = [state.config.oddsMode === 'demo' && 'football odds', state.config.racingMode === 'demo' && 'horse races'].filter(Boolean);
     $('#demo-banner').textContent = `Demo data: ${demo.join(' and ')} are simulated until a live feed is connected.`;
     $('#demo-banner').classList.toggle('hidden', !demo.length);

@@ -4,6 +4,9 @@ A private football betting site for friends, using **play money only**. One mast
 accounts, sets their usernames and passwords, and gives them credits. Players bet on real matches at **live
 bookmaker odds**, and bets settle automatically from real results.
 
+> **Currently horse racing only.** Football betting is built but switched off (`FOOTBALL_ENABLED=false`).
+> Set `FOOTBALL_ENABLED=true` to bring back the Football and Results tabs; nothing else needs to change.
+
 ## Features
 
 - **Master account:** open accounts (username + password + opening credit), credit or debit balances, reset

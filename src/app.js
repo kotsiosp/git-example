@@ -116,7 +116,7 @@ function createApp({ db, config, odds, racing, now = () => Date.now() }) {
   app.get('/api/config', (req, res) => {
     res.json({
       siteName: config.siteName, currency: config.currency, minStake: config.minStake, maxStake: config.maxStake,
-      maxLegs: config.maxLegs, oddsMode: odds.mode, racingMode: racing ? racing.mode : null,
+      maxLegs: config.maxLegs, oddsMode: odds ? odds.mode : null, racingMode: racing ? racing.mode : null,
     });
   });
 
@@ -156,7 +156,10 @@ function createApp({ db, config, odds, racing, now = () => Date.now() }) {
     });
   }
 
-  app.get('/api/events', requireUser, (req, res) => {
+  // Football can be switched off (FOOTBALL_ENABLED); its routes then answer as if they don't exist.
+  const requireFootball = (req, res, next) => (odds ? next() : res.status(404).json({ error: 'Football betting is not available' }));
+
+  app.get('/api/events', requireUser, requireFootball, (req, res) => {
     const nowIso = new Date(now()).toISOString();
     const until = new Date(now() + 10 * 86400 * 1000).toISOString();
     const rows = db.prepare(`SELECT * FROM events WHERE commence_time > ? AND commence_time < ? AND completed = 0 AND voided = 0
@@ -165,7 +168,7 @@ function createApp({ db, config, odds, racing, now = () => Date.now() }) {
     res.json({ events: eventsWithOdds(rows), refreshedAt: db.getMeta('odds_refreshed_at') });
   });
 
-  app.get('/api/results', requireUser, (req, res) => {
+  app.get('/api/results', requireUser, requireFootball, (req, res) => {
     const since = new Date(now() - 4 * 86400 * 1000).toISOString();
     const rows = db.prepare(`SELECT * FROM events WHERE commence_time > ? AND (completed = 1 OR voided = 1)
                              ORDER BY commence_time DESC LIMIT 200`).all(since);
@@ -176,7 +179,7 @@ function createApp({ db, config, odds, racing, now = () => Date.now() }) {
 
   const MARKETS = { h2h: ['home', 'draw', 'away'], totals: ['over', 'under'] };
 
-  app.post('/api/bets', requireUser, (req, res) => {
+  app.post('/api/bets', requireUser, requireFootball, (req, res) => {
     if (req.user.role !== 'user') throw new HttpError(403, 'The master account cannot place bets');
     const { selections, stake, mode = 'single' } = req.body || {};
     if (!Array.isArray(selections) || selections.length === 0) throw new HttpError(400, 'Add at least one selection');
@@ -337,7 +340,7 @@ function createApp({ db, config, odds, racing, now = () => Date.now() }) {
 
   admin.get('/users/:id/transactions', (req, res) => res.json({ transactions: transactions(findUser(req.params.id).id) }));
 
-  admin.get('/bets', (req, res) => {
+  admin.get('/bets', requireFootball, (req, res) => {
     const status = req.query.status;
     if (status && ['open', 'won', 'lost', 'void'].includes(status)) {
       return res.json({ bets: betsQuery('b.status = ?', [status], 500) });
@@ -346,14 +349,14 @@ function createApp({ db, config, odds, racing, now = () => Date.now() }) {
   });
 
   // Started matches that still have unsettled bets (e.g. postponed, or no result from the feed yet).
-  admin.get('/events/pending', (req, res) => {
+  admin.get('/events/pending', requireFootball, (req, res) => {
     const rows = db.prepare(`SELECT e.*, COUNT(l.id) AS pending_legs FROM events e JOIN bet_legs l ON l.event_id = e.id
                              WHERE l.result = 'pending' AND e.completed = 0 AND e.voided = 0 AND e.commence_time <= ?
                              GROUP BY e.id ORDER BY e.commence_time`).all(new Date(now()).toISOString());
     res.json({ events: eventsWithOdds(rows).map((e, i) => ({ ...e, pendingLegs: rows[i].pending_legs })) });
   });
 
-  admin.post('/events/:id/result', (req, res) => {
+  admin.post('/events/:id/result', requireFootball, (req, res) => {
     const h = Number(req.body?.homeScore);
     const a = Number(req.body?.awayScore);
     if (![h, a].every((n) => Number.isInteger(n) && n >= 0 && n < 100)) throw new HttpError(400, 'Enter both scores');
@@ -363,7 +366,7 @@ function createApp({ db, config, odds, racing, now = () => Date.now() }) {
     res.json({ settledBets: settleAll(db) });
   });
 
-  admin.post('/events/:id/void', (req, res) => {
+  admin.post('/events/:id/void', requireFootball, (req, res) => {
     const r = db.prepare('UPDATE events SET voided = 1 WHERE id = ? AND completed = 0').run(req.params.id);
     if (!r.changes) throw new HttpError(404, 'Match not found or already settled');
     db.prepare('DELETE FROM odds WHERE event_id = ?').run(req.params.id);
@@ -373,7 +376,7 @@ function createApp({ db, config, odds, racing, now = () => Date.now() }) {
   admin.get('/status', (req, res) => {
     const count = (sql) => db.prepare(sql).get().n;
     res.json({
-      oddsMode: odds.mode,
+      oddsMode: odds ? odds.mode : null,
       leagues: config.leagues,
       oddsRefreshedAt: db.getMeta('odds_refreshed_at'),
       scoresRefreshedAt: db.getMeta('scores_refreshed_at'),
@@ -391,8 +394,8 @@ function createApp({ db, config, odds, racing, now = () => Date.now() }) {
   });
 
   admin.post('/refresh', async (req, res) => {
-    const result = await odds.refreshOdds();
-    await odds.refreshScores();
+    const result = odds ? await odds.refreshOdds() : { errors: [] };
+    if (odds) await odds.refreshScores();
     if (racing) await racing.refresh();
     const settledBets = settleAll(db) + settleHorseBets(db);
     res.json({ errors: result.errors, settledBets });

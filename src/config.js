@@ -20,6 +20,8 @@ module.exports = {
   secureCookies: process.env.SECURE_COOKIES === 'true',
   sessionDays: Number(process.env.SESSION_DAYS || 14),
 
+  // Football betting is off for now; the site launches with horse racing only.
+  footballEnabled: process.env.FOOTBALL_ENABLED === 'true',
   // Live odds via https://the-odds-api.com. Without a key the site runs in demo mode.
   oddsApiKey: process.env.ODDS_API_KEY || '',
   oddsApiBase: process.env.ODDS_API_BASE || 'https://api.the-odds-api.com/v4',
