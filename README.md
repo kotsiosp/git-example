@@ -101,6 +101,22 @@ This is not a documented public API: Racing NRC can change or close it without n
 updating and the master can still settle bets from the *Racing* page. Without `RACING_SOURCE=nrc` the site runs
 simulated demo races. Set `RACING_ENABLED=false` to hide horse racing entirely.
 
+## Master log (for disputes)
+
+The master's **Log** page records everything that happens, in order, with the server's time to the second:
+
+- **Bets:** who, what, the stake, the prices on screen at that moment, how long before the off, and the device's
+  internet address.
+- **Results:** the finishing order and every dividend, and whether it came from the Racing NRC feed or was entered
+  by the master. Withdrawals and abandoned races are logged too.
+- **Settlements:** every bet's outcome and what was paid.
+- **Accounts:** accounts opened, credits added or removed, passwords reset, accounts disabled.
+- **Logins**, including failed attempts.
+
+It can be filtered by player and type, searched, and downloaded as a CSV spreadsheet. Entries cannot be edited or
+deleted, not even directly in the database. Each entry also carries a fingerprint (SHA-256) of the one before it,
+so **Check log is intact** shows whether anything was changed in the database file behind the site's back.
+
 ## How bets settle
 
 - **1X2:** decided on the final score reported by the results feed.

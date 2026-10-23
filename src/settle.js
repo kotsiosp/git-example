@@ -59,6 +59,10 @@ function settleAll(db) {
       if (payout > 0) {
         db.adjustBalance({ userId: bet.user_id, amount: payout, type: status === 'void' ? 'refund' : 'payout', betId });
       }
+      const username = db.prepare('SELECT username FROM users WHERE id = ?').get(bet.user_id).username;
+      db.log({ action: 'bet_settled', userId: bet.user_id,
+        summary: `Football bet #${betId} (${username}): ${status}, paid ${(payout / 100).toFixed(2)}`,
+        details: { betId, status, payout: payout / 100, legs: betLegs } });
       settled++;
     }
   });

@@ -62,6 +62,7 @@ h2 { font-size: 16px; margin: 24px 0 10px; color: var(--muted); font-weight: 600
   border: 1px solid transparent; border-radius: 8px; padding: 9px 16px; cursor: pointer;
   background: var(--accent); color: var(--accent-ink); font-weight: 700;
 }
+a.btn { text-decoration: none; }
 .btn:hover { filter: brightness(1.08); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn.ghost { background: transparent; color: var(--text); border-color: var(--line); font-weight: 500; }
@@ -227,3 +228,13 @@ input.mini { width: 80px; padding: 5px 8px; }
 .dividends { display: flex; flex-wrap: wrap; gap: 6px 16px; padding: 0 14px; }
 body.has-parlay main { padding-right: 360px; }
 @media (max-width: 900px) { body.has-parlay main { padding-right: 20px; padding-bottom: 160px; } }
+
+/* master log */
+.log { padding: 0; }
+.log-entry { padding: 10px 14px; border-bottom: 1px solid var(--line); display: grid; gap: 4px; }
+.log-entry:last-child { border-bottom: 0; }
+.log-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.log-time { font-variant-numeric: tabular-nums; font-weight: 700; }
+.log-entry pre { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px; font-size: 12px; overflow-x: auto; margin: 6px 0 0; }
+.log-filters { margin-bottom: 12px; }
+.log-apply { flex: 0 0 auto; min-width: 0; }

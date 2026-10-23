@@ -2,6 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
 
 const SCHEMA = `
@@ -189,6 +190,29 @@ CREATE TABLE IF NOT EXISTS horse_parlay_legs (
 );
 CREATE INDEX IF NOT EXISTS horse_parlay_legs_race ON horse_parlay_legs(race_id, result);
 
+-- The master log: an append-only record of bets, results, settlements, logins and master actions,
+-- for settling disputes. Rows cannot be changed or deleted, and each row's hash covers the one
+-- before it, so editing the file directly breaks the chain.
+CREATE TABLE IF NOT EXISTS audit_log (
+  id INTEGER PRIMARY KEY,
+  at TEXT NOT NULL,                            -- server time, ISO 8601 with milliseconds
+  actor_id INTEGER,                            -- who did it; NULL for the system or a feed
+  actor TEXT NOT NULL,                         -- username, 'system' or the feed's name
+  user_id INTEGER,                             -- the player it concerns, for filtering
+  action TEXT NOT NULL,
+  summary TEXT NOT NULL,                       -- plain-language description
+  details TEXT,                                -- JSON with everything known at the time
+  ip TEXT,
+  prev_hash TEXT,
+  hash TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS audit_log_user ON audit_log(user_id, id);
+CREATE INDEX IF NOT EXISTS audit_log_action ON audit_log(action, id);
+CREATE TRIGGER IF NOT EXISTS audit_log_no_update BEFORE UPDATE ON audit_log
+  BEGIN SELECT RAISE(ABORT, 'The master log cannot be changed'); END;
+CREATE TRIGGER IF NOT EXISTS audit_log_no_delete BEFORE DELETE ON audit_log
+  BEGIN SELECT RAISE(ABORT, 'The master log cannot be changed'); END;
+
 CREATE TABLE IF NOT EXISTS meta (
   key TEXT PRIMARY KEY,
   value TEXT
@@ -226,6 +250,31 @@ function open(file) {
   db.setMeta = (key, value) =>
     db.prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
       .run(key, value == null ? null : String(value));
+
+  const logHash = (prev, r) => crypto.createHash('sha256')
+    .update(JSON.stringify([prev, r.at, r.actor_id, r.actor, r.user_id, r.action, r.summary, r.details, r.ip])).digest('hex');
+
+  // Appends to the master log. `details` is stored as JSON.
+  db.log = ({ action, summary, actor = null, userId = null, details = null, ip = null, at = new Date().toISOString() }) => {
+    const prev = db.prepare('SELECT hash FROM audit_log ORDER BY id DESC LIMIT 1').get()?.hash ?? null;
+    const row = { at, actor_id: actor?.id ?? null, actor: actor?.username ?? actor?.name ?? 'system', user_id: userId,
+      action, summary, details: details == null ? null : JSON.stringify(details), ip };
+    db.prepare(`INSERT INTO audit_log (at, actor_id, actor, user_id, action, summary, details, ip, prev_hash, hash)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(row.at, row.actor_id, row.actor, row.user_id, row.action, row.summary, row.details, row.ip, prev, logHash(prev, row));
+  };
+
+  // Recomputes the chain. Returns the first entry that no longer matches what was written, if any.
+  db.verifyLog = () => {
+    let prev = null;
+    let count = 0;
+    for (const r of db.prepare('SELECT * FROM audit_log ORDER BY id').iterate()) {
+      if (r.prev_hash !== prev || r.hash !== logHash(prev, r)) return { intact: false, count, brokenAt: r.id };
+      prev = r.hash;
+      count++;
+    }
+    return { intact: true, count };
+  };
 
   // Moves money and writes the ledger entry. Must run inside db.tx().
   db.adjustBalance = ({ userId, amount, type, betId = null, horseBetId = null, horseTicketId = null, note = null, byUserId = null }) => {

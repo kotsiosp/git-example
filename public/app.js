@@ -107,7 +107,7 @@
   // ---------------------------------------------------------------- routing
 
   const USER_VIEWS = { matches: 'Football', horses: 'Horses', bets: 'My bets', results: 'Results', history: 'Statement', account: 'Account' };
-  const ADMIN_VIEWS = { users: 'Players', allbets: 'All bets', settle: 'Settlement', racing: 'Racing', feed: 'Feeds', results: 'Results', account: 'Account' };
+  const ADMIN_VIEWS = { users: 'Players', allbets: 'All bets', settle: 'Settlement', racing: 'Racing', log: 'Log', feed: 'Feeds', results: 'Results', account: 'Account' };
 
   // The views this user can open, minus any sport the site has switched off.
   function availableViews() {
@@ -180,7 +180,7 @@
     const views = {
       matches: renderMatches, bets: renderMyBets, results: renderResults, history: renderHistory, account: renderAccount,
       users: renderUsers, allbets: renderAllBets, settle: renderSettle, feed: renderFeed,
-      horses: renderHorses, racing: renderRacingAdmin,
+      horses: renderHorses, racing: renderRacingAdmin, log: renderLog,
     };
     try {
       await views[view](main);
@@ -554,6 +554,7 @@
           <td><div class="actions">
             <button class="btn small" data-act="credit" data-id="${u.id}">Credit / debit</button>
             <button class="btn ghost small" data-act="tx" data-id="${u.id}">Statement</button>
+            <button class="btn ghost small" data-act="log" data-id="${u.id}">Log</button>
             <button class="btn ghost small" data-act="pw" data-id="${u.id}">Set password</button>
             <button class="btn ${u.active ? 'danger' : 'ghost'} small" data-act="active" data-id="${u.id}" data-active="${u.active ? 0 : 1}">${u.active ? 'Disable' : 'Enable'}</button>
           </div></td></tr>`).join('')}
@@ -599,6 +600,9 @@
         } else if (b.dataset.act === 'active') {
           await api(`/admin/users/${u.id}/active`, { active: b.dataset.active === '1' });
           render();
+        } else if (b.dataset.act === 'log') {
+          state.logFilter = { user: String(u.id), type: '', q: '' };
+          location.hash = '#/log';
         } else if (b.dataset.act === 'tx') {
           const { transactions } = await api(`/admin/users/${u.id}/transactions`);
           main.innerHTML = `<div class="bet-top"><h1>Statement · ${esc(u.username)}</h1><a class="btn ghost small" href="#/users" id="back">← Players</a></div>${txTable(transactions)}`;
@@ -1165,6 +1169,68 @@
         })));
       };
     });
+  }
+
+
+  // ---------------------------------------------------------------- master log
+
+  state.logFilter = { user: '', type: '', q: '' };
+  const LOG_TYPES = { '': 'Everything', bets: 'Bets and settlements', results: 'Results, withdrawals, abandoned races',
+    accounts: 'Accounts and credits', logins: 'Logins' };
+  const logTime = (iso) => new Date(iso).toLocaleString(undefined, { day: 'numeric', month: 'short', year: 'numeric',
+    hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+  async function renderLog(main) {
+    const f = state.logFilter;
+    const query = new URLSearchParams(Object.entries(f).filter(([, v]) => v)).toString();
+    const [{ users }, first] = await Promise.all([api('/admin/users'), api(`/admin/log?${query}`)]);
+    main.innerHTML = `<div class="bet-top"><h1>Master log</h1>
+        <div class="actions"><button class="btn ghost small" id="log-verify">Check log is intact</button>
+          <a class="btn ghost small" href="/api/admin/log.csv?${esc(query)}" download>Download (CSV)</a></div></div>
+      <p class="muted">Everything that happens on the site, in order, with the server's time to the second: bets with the prices shown
+        and how long before the off they were placed, results and dividends and where they came from, every settlement, every
+        credit and account change, and logins. Entries can't be edited or deleted.</p>
+      <p id="log-verify-result" class="small"></p>
+      <form class="card form-row log-filters" id="log-filter">
+        <div><label for="lf-user">Player</label><select id="lf-user"><option value="">All players</option>
+          ${users.map((u) => `<option value="${u.id}" ${String(u.id) === f.user ? 'selected' : ''}>${esc(u.username)}</option>`).join('')}</select></div>
+        <div><label for="lf-type">Show</label><select id="lf-type">${Object.entries(LOG_TYPES).map(([k, v]) =>
+          `<option value="${k}" ${k === f.type ? 'selected' : ''}>${v}</option>`).join('')}</select></div>
+        <div><label for="lf-q">Search</label><input id="lf-q" value="${esc(f.q)}" placeholder="horse, bet number, race…"></div>
+        <div class="log-apply"><button class="btn" type="submit">Show</button></div>
+      </form>
+      <div class="card log" id="log-list"></div>
+      <p><button class="btn ghost hidden" id="log-more">Show older entries</button></p>`;
+
+    let lastId = null;
+    const add = ({ entries, more }) => {
+      const list = $('#log-list');
+      if (!entries.length && !lastId) list.innerHTML = '<div class="empty-state">No log entries match.</div>';
+      list.insertAdjacentHTML('beforeend', entries.map((e) => `<div class="log-entry">
+        <div class="log-meta"><span class="log-time">${esc(logTime(e.at))}</span><span class="badge ${e.action.includes('failed') ? 'lost' : 'pending'}">${esc(e.action.replace(/_/g, ' '))}</span>
+          <span class="muted small">#${e.id}${e.ip ? ` · ${esc(e.ip)}` : ''}</span></div>
+        <div>${esc(e.summary)}</div>
+        ${e.details ? `<details><summary class="muted small">Full details</summary><pre>${esc(JSON.stringify(e.details, null, 2))}</pre></details>` : ''}
+      </div>`).join(''));
+      if (entries.length) lastId = entries[entries.length - 1].id;
+      $('#log-more').classList.toggle('hidden', !more);
+    };
+    add(first);
+
+    $('#log-filter').onsubmit = (e) => {
+      e.preventDefault();
+      state.logFilter = { user: $('#lf-user').value, type: $('#lf-type').value, q: $('#lf-q').value.trim() };
+      render();
+    };
+    $('#log-more').onclick = async () => add(await api(`/admin/log?${query}${query ? '&' : ''}before=${lastId}`));
+    $('#log-verify').onclick = async () => {
+      const r = await api('/admin/log/verify');
+      const el = $('#log-verify-result');
+      el.className = `small ${r.intact ? 'pos' : 'neg'}`;
+      el.textContent = r.intact
+        ? `✓ The log is intact: all ${r.count} entries are exactly as they were written.`
+        : `✗ Entry #${r.brokenAt} no longer matches what was written. The log was changed outside the site from that point on.`;
+    };
   }
 
   // ---------------------------------------------------------------- boot

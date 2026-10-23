@@ -2,12 +2,20 @@
 
 const express = require('express');
 const { HttpError, toCents, fromCents, requireUser, requireAdmin } = require('./util');
-const { settleHorseBets, recordResult } = require('./racing');
+const { settleHorseBets, recordResult, raceLabel, resultSummary } = require('./racing');
 const { POOLS, BetError, expand, comboKey } = require('./tote');
 
-function racingRoutes({ db, config, now = () => Date.now() }) {
+function racingRoutes({ db, config, now = () => Date.now(), audit = () => {} }) {
   const router = express.Router();
   const nowIso = () => new Date(now()).toISOString();
+  const money = (cents) => fromCents(cents).toFixed(2);
+
+  // When a bet was struck relative to the off, and how fresh the prices on screen were.
+  const timing = (race) => {
+    const secondsBeforeOff = Math.round((Date.parse(race.post_time) - now()) / 1000);
+    return { text: `${Math.floor(secondsBeforeOff / 60)} min ${secondsBeforeOff % 60} s before the off`,
+      details: { postTime: race.post_time, secondsBeforeOff, pricesUpdatedAt: race.prices_updated_at } };
+  };
 
   function racesWithRunners(rows, { openBets = false } = {}) {
     const runnerStmt = db.prepare('SELECT * FROM runners WHERE race_id = ? ORDER BY number');
@@ -84,6 +92,12 @@ function racingRoutes({ db, config, now = () => Date.now() }) {
       const { lastInsertRowid } = db.prepare(`INSERT INTO horse_bets (user_id, race_id, runner_no, bet_type, stake, price_at_bet)
                                               VALUES (?, ?, ?, ?, ?, ?)`).run(req.user.id, race.id, runner.number, type, stakeCents, price);
       db.adjustBalance({ userId: req.user.id, amount: -stakeCents, type: 'bet', horseBetId: Number(lastInsertRowid) });
+      const when = timing(race);
+      audit(req, { action: 'bet_placed', userId: req.user.id,
+        summary: `${req.user.username} placed bet #H${lastInsertRowid}: ${type === 'win' ? 'Win' : 'Place'} ${money(stakeCents)} on `
+          + `${runner.number}. ${runner.horse}, ${raceLabel(race)} (price shown ${price ?? '–'}, ${when.text})`,
+        details: { betId: `H${lastInsertRowid}`, raceId: race.id, runnerNo: runner.number, horse: runner.horse, betType: type,
+          stake: fromCents(stakeCents), priceShown: price, ...when.details } });
       return Number(lastInsertRowid);
     }));
     const balance = db.prepare('SELECT balance FROM users WHERE id = ?').get(req.user.id).balance;
@@ -137,7 +151,8 @@ function racingRoutes({ db, config, now = () => Date.now() }) {
     }
   };
 
-  function placeExotic(user, { raceId, pool, mode, selections, unitStake }) {
+  function placeExotic(req, { raceId, pool, mode, selections, unitStake }) {
+    const { user } = req;
     const race = openRaceForBetting(raceId);
     if (!POOLS[pool]) throw new HttpError(400, 'Unknown bet type');
     if (!JSON.parse(race.pools || '[]').includes(pool)) throw new HttpError(400, `${POOLS[pool].name} is not offered on this race`);
@@ -163,11 +178,19 @@ function racingRoutes({ db, config, now = () => Date.now() }) {
       const line = db.prepare('INSERT INTO horse_ticket_lines (ticket_id, combo) VALUES (?, ?)');
       for (const c of combos) line.run(id, c);
       db.adjustBalance({ userId: user.id, amount: -unit * combos.length, type: 'bet', horseTicketId: id });
+      const when = timing(race);
+      const shown = combos.length <= 10 ? combos.join(', ') : `${combos.slice(0, 10).join(', ')} and ${combos.length - 10} more`;
+      audit(req, { action: 'bet_placed', userId: user.id,
+        summary: `${user.username} placed bet #T${id}: ${POOLS[pool].name} ${mode}, ${combos.length} × ${money(unit)} = ${money(unit * combos.length)}`
+          + ` on ${raceLabel(race)} (${when.text}): ${shown}`,
+        details: { betId: `T${id}`, raceId: race.id, pool, mode, selections, combos, unitStake: fromCents(unit),
+          stake: fromCents(unit * combos.length), ...when.details } });
       return id;
     });
   }
 
-  function placeParlay(user, { legs, stake }) {
+  function placeParlay(req, { legs, stake }) {
+    const { user } = req;
     if (!Array.isArray(legs) || legs.length < 2) throw new HttpError(400, 'A parlay needs horses in at least 2 races');
     if (legs.length > config.maxLegs) throw new HttpError(400, `At most ${config.maxLegs} races in a parlay`);
     if (new Set(legs.map((l) => String(l?.raceId))).size !== legs.length) throw new HttpError(400, 'Pick one horse per race in a parlay');
@@ -178,7 +201,9 @@ function racingRoutes({ db, config, now = () => Date.now() }) {
       if (runner.withdrawn) throw new HttpError(400, `${runner.horse} has been withdrawn`);
       if (!['win', 'place'].includes(l.betType)) throw new HttpError(400, 'Each parlay leg is a win or a place bet');
       if (l.betType === 'place' && !race.places_paid) throw new HttpError(400, `There is no place betting on race ${race.race_no}`);
-      return { raceId: race.id, runnerNo: runner.number, betType: l.betType, price: l.betType === 'win' ? runner.win_price : runner.place_price };
+      return { raceId: race.id, runnerNo: runner.number, betType: l.betType, price: l.betType === 'win' ? runner.win_price : runner.place_price,
+        label: `${runner.number}. ${runner.horse} (${l.betType}, ${raceLabel(race)}, price shown ${(l.betType === 'win' ? runner.win_price : runner.place_price) ?? '–'}, ${timing(race).text})`,
+        postTime: race.post_time };
     });
     const cents = toCents(stake, 'Stake');
     checkStake(cents);
@@ -189,6 +214,9 @@ function racingRoutes({ db, config, now = () => Date.now() }) {
       const leg = db.prepare('INSERT INTO horse_parlay_legs (ticket_id, race_id, runner_no, bet_type, price_at_bet) VALUES (?, ?, ?, ?, ?)');
       for (const l of clean) leg.run(id, l.raceId, l.runnerNo, l.betType, l.price);
       db.adjustBalance({ userId: user.id, amount: -cents, type: 'bet', horseTicketId: id });
+      audit(req, { action: 'bet_placed', userId: user.id,
+        summary: `${user.username} placed bet #T${id}: ${clean.length}-race parlay, ${money(cents)} on ${clean.map((l) => l.label).join(' + ')}`,
+        details: { betId: `T${id}`, stake: fromCents(cents), legs: clean.map(({ label, ...l }) => l), placedAt: nowIso() } });
       return id;
     });
   }
@@ -196,8 +224,8 @@ function racingRoutes({ db, config, now = () => Date.now() }) {
   router.post('/horse-tickets', requireUser, (req, res) => {
     if (req.user.role !== 'user') throw new HttpError(403, 'The master account cannot place bets');
     const body = req.body || {};
-    const id = body.kind === 'parlay' ? placeParlay(req.user, body)
-      : body.kind === 'exotic' ? placeExotic(req.user, body)
+    const id = body.kind === 'parlay' ? placeParlay(req, body)
+      : body.kind === 'exotic' ? placeExotic(req, body)
         : (() => { throw new HttpError(400, 'Unknown bet'); })();
     const balance = db.prepare('SELECT balance FROM users WHERE id = ?').get(req.user.id).balance;
     res.status(201).json({ ticketId: id, balance: fromCents(balance) });
@@ -281,6 +309,9 @@ function racingRoutes({ db, config, now = () => Date.now() }) {
     const r = db.prepare('UPDATE runners SET withdrawn = 1, win_price = NULL, place_price = NULL WHERE race_id = ? AND number = ?')
       .run(race.id, Number(req.params.no));
     if (!r.changes) throw new HttpError(404, 'Runner not found');
+    const horse = db.prepare('SELECT horse FROM runners WHERE race_id = ? AND number = ?').get(race.id, Number(req.params.no)).horse;
+    audit(req, { action: 'runner_withdrawn', summary: `${req.user.username} withdrew ${req.params.no}. ${horse} from ${raceLabel(race)}`,
+      details: { raceId: race.id, runnerNo: Number(req.params.no), horse } });
     res.json({ settledBets: settleHorseBets(db) });
   });
 
@@ -317,13 +348,20 @@ function racingRoutes({ db, config, now = () => Date.now() }) {
         (pools[pool] ||= {})[comboKey(pool, numbers)] = Number(div);
       }
     }
-    db.tx(() => recordResult(db, race.id, clean, pools));
+    db.tx(() => {
+      recordResult(db, race.id, clean, pools);
+      const r = resultSummary(db, race.id);
+      audit(req, { action: 'result_entered', summary: `${req.user.username} entered the result of ${raceLabel(race)} by hand: ${r.text}`,
+        details: { raceId: race.id, ...r.details } });
+    });
     res.json({ settledBets: settleHorseBets(db) });
   });
 
   admin.post('/races/:id/abandon', (req, res) => {
     const race = findOpenRace(req.params.id);
     db.prepare("UPDATE races SET status = 'abandoned' WHERE id = ?").run(race.id);
+    audit(req, { action: 'race_abandoned', summary: `${req.user.username} abandoned ${raceLabel(race)}; all bets on it are refunded`,
+      details: { raceId: race.id } });
     res.json({ settledBets: settleHorseBets(db) });
   });
 

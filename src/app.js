@@ -87,6 +87,9 @@ function createApp({ db, config, odds, racing, now = () => Date.now() }) {
     else entry.count++;
   }
 
+  // Master log entries carry the request's address and the server time.
+  const audit = (req, entry) => db.log({ ip: req.ip, at: new Date(now()).toISOString(), actor: req.user, ...entry });
+
   app.post('/api/login', (req, res) => {
     const { username, password } = req.body || {};
     const key = `${req.ip}|${String(username).toLowerCase()}`;
@@ -94,9 +97,16 @@ function createApp({ db, config, odds, racing, now = () => Date.now() }) {
     const user = typeof username === 'string' && db.prepare('SELECT * FROM users WHERE username = ?').get(username);
     if (!user || typeof password !== 'string' || !bcrypt.compareSync(password, user.password_hash)) {
       recordFailure(key);
+      audit(req, { action: 'login_failed', actor: { name: 'unknown' }, userId: user ? user.id : null,
+        summary: `Failed login as "${String(username).slice(0, 40)}"` });
       throw new HttpError(401, 'Wrong username or password');
     }
-    if (!user.active) throw new HttpError(403, 'This account has been disabled');
+    if (!user.active) {
+      audit(req, { action: 'login_failed', actor: user, userId: user.id, summary: `${user.username} tried to log in to a disabled account` });
+      throw new HttpError(403, 'This account has been disabled');
+    }
+    audit(req, { action: 'login', actor: user, userId: user.id, summary: `${user.username} logged in`,
+      details: { userAgent: String(req.headers['user-agent'] || '').slice(0, 200) } });
     loginAttempts.delete(key);
 
     const token = crypto.randomBytes(32).toString('base64url');
@@ -130,6 +140,7 @@ function createApp({ db, config, odds, racing, now = () => Date.now() }) {
     validatePassword(newPassword);
     db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(bcrypt.hashSync(newPassword, 10), req.user.id);
     db.prepare('DELETE FROM sessions WHERE user_id = ? AND token != ?').run(req.user.id, req.sessionToken);
+    audit(req, { action: 'password_changed', userId: req.user.id, summary: `${req.user.username} changed their password` });
     res.json({ ok: true });
   });
 
@@ -220,6 +231,12 @@ function createApp({ db, config, odds, racing, now = () => Date.now() }) {
       const insertLeg = db.prepare('INSERT INTO bet_legs (bet_id, event_id, market, outcome, point, price) VALUES (?, ?, ?, ?, ?, ?)');
       for (const l of group) insertLeg.run(betId, l.eventId, l.market, l.outcome, l.point, l.price);
       db.adjustBalance({ userId: req.user.id, amount: -stakeCents, type: 'bet', betId: Number(betId) });
+      const evs = group.map((l) => db.prepare('SELECT home_team, away_team, commence_time FROM events WHERE id = ?').get(l.eventId));
+      audit(req, { action: 'bet_placed', userId: req.user.id,
+        summary: `${req.user.username} placed football bet #${betId}: ${fromCents(stakeCents).toFixed(2)} at ${totalOdds} on `
+          + group.map((l, i) => `${evs[i].home_team} v ${evs[i].away_team} ${l.market} ${l.outcome} @ ${l.price}`).join(' + '),
+        details: { betId: Number(betId), stake: fromCents(stakeCents), totalOdds,
+          legs: group.map((l, i) => ({ ...l, kickoff: evs[i].commence_time })) } });
       return Number(betId);
     }));
     const balance = db.prepare('SELECT balance FROM users WHERE id = ?').get(req.user.id).balance;
@@ -308,6 +325,8 @@ function createApp({ db, config, odds, racing, now = () => Date.now() }) {
       const { lastInsertRowid } = db.prepare("INSERT INTO users (username, password_hash, role) VALUES (?, ?, 'user')")
         .run(username, bcrypt.hashSync(password, 10));
       if (credit > 0) db.adjustBalance({ userId: Number(lastInsertRowid), amount: credit, type: 'credit', note: 'Opening credit', byUserId: req.user.id });
+      audit(req, { action: 'account_created', userId: Number(lastInsertRowid),
+        summary: `${req.user.username} opened account ${username} with ${fromCents(credit).toFixed(2)} ${config.currency}` });
       return db.prepare('SELECT * FROM users WHERE id = ?').get(lastInsertRowid);
     });
     res.status(201).json({ user: publicUser(user) });
@@ -318,9 +337,14 @@ function createApp({ db, config, odds, racing, now = () => Date.now() }) {
     const amount = toCents(req.body?.amount);
     if (amount === 0) throw new HttpError(400, 'Amount cannot be zero');
     const note = typeof req.body?.note === 'string' ? req.body.note.slice(0, 200) : null;
-    const balance = db.tx(() => db.adjustBalance({
-      userId: user.id, amount, type: amount > 0 ? 'credit' : 'debit', note, byUserId: req.user.id,
-    }));
+    const balance = db.tx(() => {
+      const after = db.adjustBalance({ userId: user.id, amount, type: amount > 0 ? 'credit' : 'debit', note, byUserId: req.user.id });
+      audit(req, { action: amount > 0 ? 'credit' : 'debit', userId: user.id,
+        summary: `${req.user.username} ${amount > 0 ? 'added' : 'removed'} ${fromCents(Math.abs(amount)).toFixed(2)} ${amount > 0 ? 'to' : 'from'} ${user.username}`
+          + `${note ? ` ("${note}")` : ''}; balance now ${fromCents(after).toFixed(2)}`,
+        details: { amount: fromCents(amount), note, balanceAfter: fromCents(after) } });
+      return after;
+    });
     res.json({ balance: fromCents(balance) });
   });
 
@@ -329,6 +353,7 @@ function createApp({ db, config, odds, racing, now = () => Date.now() }) {
     validatePassword(req.body?.password);
     db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(bcrypt.hashSync(req.body.password, 10), user.id);
     db.prepare('DELETE FROM sessions WHERE user_id = ?').run(user.id);
+    audit(req, { action: 'password_reset', userId: user.id, summary: `${req.user.username} set a new password for ${user.username}` });
     res.json({ ok: true });
   });
 
@@ -337,6 +362,8 @@ function createApp({ db, config, odds, racing, now = () => Date.now() }) {
     const active = req.body?.active ? 1 : 0;
     db.prepare('UPDATE users SET active = ? WHERE id = ?').run(active, user.id);
     if (!active) db.prepare('DELETE FROM sessions WHERE user_id = ?').run(user.id);
+    audit(req, { action: active ? 'account_enabled' : 'account_disabled', userId: user.id,
+      summary: `${req.user.username} ${active ? 'enabled' : 'disabled'} ${user.username}'s account` });
     res.json({ ok: true });
   });
 
@@ -365,6 +392,9 @@ function createApp({ db, config, odds, racing, now = () => Date.now() }) {
     const r = db.prepare('UPDATE events SET completed = 1, voided = 0, home_score = ?, away_score = ? WHERE id = ? AND completed = 0')
       .run(h, a, req.params.id);
     if (!r.changes) throw new HttpError(404, 'Match not found or already settled');
+    const ev = db.prepare('SELECT home_team, away_team FROM events WHERE id = ?').get(req.params.id);
+    audit(req, { action: 'result_entered', summary: `${req.user.username} entered the result ${ev.home_team} ${h}–${a} ${ev.away_team}`,
+      details: { eventId: req.params.id, homeScore: h, awayScore: a } });
     res.json({ settledBets: settleAll(db) });
   });
 
@@ -372,6 +402,8 @@ function createApp({ db, config, odds, racing, now = () => Date.now() }) {
     const r = db.prepare('UPDATE events SET voided = 1 WHERE id = ? AND completed = 0').run(req.params.id);
     if (!r.changes) throw new HttpError(404, 'Match not found or already settled');
     db.prepare('DELETE FROM odds WHERE event_id = ?').run(req.params.id);
+    const ev = db.prepare('SELECT home_team, away_team FROM events WHERE id = ?').get(req.params.id);
+    audit(req, { action: 'race_abandoned', summary: `${req.user.username} voided ${ev.home_team} v ${ev.away_team}`, details: { eventId: req.params.id } });
     res.json({ settledBets: settleAll(db) });
   });
 
@@ -404,8 +436,55 @@ function createApp({ db, config, odds, racing, now = () => Date.now() }) {
     res.json({ errors: result.errors, settledBets });
   });
 
+  // ------------------------------------------------------------ master log
+
+  const LOG_GROUPS = {
+    bets: ['bet_placed', 'bet_settled'],
+    results: ['result_received', 'result_entered', 'race_abandoned', 'runner_withdrawn'],
+    accounts: ['account_created', 'credit', 'debit', 'password_reset', 'account_disabled', 'account_enabled', 'password_changed'],
+    logins: ['login', 'login_failed'],
+  };
+
+  function logQuery(q, { before = null } = {}) {
+    const where = [];
+    const params = [];
+    if (q.user) { where.push('l.user_id = ?'); params.push(Number(q.user)); }
+    if (LOG_GROUPS[q.type]) { where.push(`l.action IN (${LOG_GROUPS[q.type].map(() => '?').join(', ')})`); params.push(...LOG_GROUPS[q.type]); }
+    if (q.q) { where.push('(l.summary LIKE ? OR l.details LIKE ?)'); params.push(`%${String(q.q).slice(0, 100)}%`, `%${String(q.q).slice(0, 100)}%`); }
+    if (q.from) { where.push('l.at >= ?'); params.push(String(q.from)); }
+    if (q.to) { where.push('l.at < ?'); params.push(String(q.to)); }
+    if (before) { where.push('l.id < ?'); params.push(before); }
+    return { where: where.length ? `WHERE ${where.join(' AND ')}` : '', params };
+  }
+
+  admin.get('/log', (req, res) => {
+    const { where, params } = logQuery(req.query, { before: Number(req.query.before) || null });
+    const limit = Math.min(Number(req.query.limit) || 100, 500);
+    const rows = db.prepare(`SELECT l.*, u.username AS player FROM audit_log l LEFT JOIN users u ON u.id = l.user_id
+      ${where} ORDER BY l.id DESC LIMIT ${limit}`).all(...params);
+    res.json({
+      entries: rows.map((r) => ({ id: r.id, at: r.at, actor: r.actor, player: r.player, action: r.action, summary: r.summary,
+        details: r.details ? JSON.parse(r.details) : null, ip: r.ip })),
+      more: rows.length === limit,
+    });
+  });
+
+  admin.get('/log/verify', (req, res) => res.json(db.verifyLog()));
+
+  admin.get('/log.csv', (req, res) => {
+    const { where, params } = logQuery(req.query);
+    const cell = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const lines = [['Entry', 'Time (UTC)', 'Who', 'Player', 'Action', 'What happened', 'Address', 'Details'].map(cell).join(',')];
+    for (const r of db.prepare(`SELECT l.*, u.username AS player FROM audit_log l LEFT JOIN users u ON u.id = l.user_id ${where} ORDER BY l.id`).iterate(...params)) {
+      lines.push([r.id, r.at, r.actor, r.player, r.action, r.summary, r.ip, r.details].map(cell).join(','));
+    }
+    res.set('Content-Type', 'text/csv; charset=utf-8');
+    res.set('Content-Disposition', `attachment; filename="${config.siteName.replace(/\W+/g, '-').toLowerCase()}-log-${new Date(now()).toISOString().slice(0, 10)}.csv"`);
+    res.send(`﻿${lines.join('\r\n')}\r\n`);
+  });
+
   app.use('/api/admin', admin);
-  if (racing) app.use('/api', racingRoutes({ db, config, now }));
+  if (racing) app.use('/api', racingRoutes({ db, config, now, audit }));
 
   app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 

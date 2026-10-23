@@ -159,6 +159,27 @@ function settleParlays(db) {
 function finishTicket(db, t, status, payout, txType) {
   db.prepare("UPDATE horse_tickets SET status = ?, payout = ?, settled_at = datetime('now') WHERE id = ?").run(status, payout, t.id);
   if (payout > 0) db.adjustBalance({ userId: t.user_id, amount: payout, type: txType, horseTicketId: t.id });
+  const username = db.prepare('SELECT username FROM users WHERE id = ?').get(t.user_id).username;
+  const money = (c) => (c / 100).toFixed(2);
+  let what;
+  let details;
+  if (t.kind === 'exotic') {
+    const race = db.prepare('SELECT meeting, race_no FROM races WHERE id = ?').get(t.race_id);
+    const lines = db.prepare('SELECT combo, result, dividend FROM horse_ticket_lines WHERE ticket_id = ?').all(t.id);
+    const won = lines.filter((l) => l.result === 'won');
+    const refunded = lines.filter((l) => l.result === 'void').length;
+    what = `${POOLS[t.pool].name} ${t.mode} on ${race.meeting} race ${race.race_no} (${lines.length} × ${money(t.unit_stake)})`
+      + `${won.length ? `, winning: ${won.map((l) => `${l.combo} at ${l.dividend.toFixed(2)}`).join(', ')}` : ''}`
+      + `${refunded ? `, ${refunded} refunded` : ''}`;
+    details = { lines };
+  } else {
+    const legs = db.prepare(`SELECT l.runner_no, l.bet_type, l.result, l.dividend, r.meeting, r.race_no FROM horse_parlay_legs l
+      JOIN races r ON r.id = l.race_id WHERE l.ticket_id = ?`).all(t.id);
+    what = `parlay ${money(t.stake)}: ${legs.map((l) => `${l.meeting} race ${l.race_no} ${l.runner_no} ${l.bet_type} ${l.result}${l.dividend ? ` ${l.dividend.toFixed(2)}` : ''}`).join(', ')}`;
+    details = { legs };
+  }
+  db.log({ action: 'bet_settled', userId: t.user_id, summary: `Bet #T${t.id} (${username}): ${what}: ${status}, paid ${money(payout)}`,
+    details: { betId: `T${t.id}`, status, payout: payout / 100, ...details } });
 }
 
 function settleTickets(db) {

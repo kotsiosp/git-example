@@ -192,8 +192,35 @@ function createDemoProvider({ now }) {
 
 // ---------------------------------------------------------------- service
 
+const raceLabel = (race) => `${race.meeting} race ${race.race_no}`;
+const ORDINAL = ['', '1st', '2nd', '3rd', '4th'];
+
+// A race's result in words and in full, for the master log.
+function resultSummary(db, raceId) {
+  const runners = db.prepare('SELECT * FROM runners WHERE race_id = ? ORDER BY finish_pos IS NULL, finish_pos, number').all(raceId);
+  const dividends = db.prepare('SELECT pool, combo, dividend FROM race_dividends WHERE race_id = ?').all(raceId);
+  const placed = runners.filter((u) => u.finish_pos && u.finish_pos <= 4);
+  const pays = (u) => [u.win_dividend && `win ${u.win_dividend.toFixed(2)}`, u.place_dividend && `place ${u.place_dividend.toFixed(2)}`].filter(Boolean);
+  const text = [
+    placed.map((u) => `${ORDINAL[u.finish_pos]} ${u.number}. ${u.horse}${pays(u).length ? ` (${pays(u).join(', ')})` : ''}`).join(', '),
+    ...dividends.map((d) => `${POOLS[d.pool]?.name || d.pool} ${d.combo} ${d.dividend.toFixed(2)}`),
+    ...(runners.some((u) => u.withdrawn) ? [`withdrawn: ${runners.filter((u) => u.withdrawn).map((u) => u.number).join(', ')}`] : []),
+  ].filter(Boolean).join('; ');
+  return {
+    text,
+    details: {
+      finishingOrder: placed.map((u) => u.number),
+      runners: runners.map((u) => ({ number: u.number, horse: u.horse, position: u.finish_pos, withdrawn: !!u.withdrawn,
+        winDividend: u.win_dividend, placeDividend: u.place_dividend })),
+      dividends,
+    },
+  };
+}
+
 function createRacingService(db, config, { now = () => Date.now(), log = console, provider } = {}) {
   provider ||= createDemoProvider({ now });
+  const feed = { name: provider.mode === 'nrc' ? 'Racing NRC feed' : 'demo feed' };
+  const stamp = () => new Date(now()).toISOString();
 
   function storeCards(cards) {
     const nowIso = new Date(now()).toISOString();
@@ -214,11 +241,18 @@ function createRacingService(db, config, { now = () => Date.now(), log = console
         withdrawn = MAX(runners.withdrawn, excluded.withdrawn)
       WHERE (SELECT status FROM races WHERE id = runners.race_id) = 'open'
         AND (SELECT post_time FROM races WHERE id = runners.race_id) > ?`);
+    const before = db.prepare('SELECT withdrawn, horse FROM runners WHERE race_id = ? AND number = ?');
     db.tx(() => {
       for (const c of cards) {
         upsertRace.run(c.id, c.meeting, c.raceNo, c.name ?? null, c.postTime, c.distance ?? null, c.placesPaid ?? 3, nowIso,
           JSON.stringify((c.pools || []).filter((pool) => POOLS[pool])));
         for (const r of c.runners) {
+          const was = before.get(c.id, r.number);
+          if (was && !was.withdrawn && r.withdrawn && Date.parse(c.postTime) > now()) {
+            db.log({ action: 'runner_withdrawn', actor: feed, at: stamp(),
+              summary: `${feed.name} reported ${r.number}. ${was.horse} withdrawn from ${c.meeting} race ${c.raceNo}`,
+              details: { raceId: c.id, runnerNo: r.number, horse: was.horse } });
+          }
           upsertRunner.run(c.id, r.number, r.horse, r.jockey ?? null, r.trainer ?? null, r.weight ?? null,
             r.draw ?? null, r.form ?? null, r.withdrawn ? null : r.winPrice ?? null,
             r.withdrawn ? null : r.placePrice ?? null, r.withdrawn ? 1 : 0, nowIso);
@@ -232,11 +266,17 @@ function createRacingService(db, config, { now = () => Date.now(), log = console
       for (const res of results) {
         const race = db.prepare("SELECT id FROM races WHERE id = ? AND status = 'open'").get(res.id);
         if (!race) continue;
+        const label = raceLabel(db.prepare('SELECT * FROM races WHERE id = ?').get(res.id));
         if (res.abandoned) {
           db.prepare("UPDATE races SET status = 'abandoned' WHERE id = ?").run(res.id);
+          db.log({ action: 'race_abandoned', actor: feed, at: stamp(), summary: `${feed.name} reported ${label} cancelled; all bets on it are refunded`,
+            details: { raceId: res.id } });
           continue;
         }
         recordResult(db, res.id, res.runners, res.pools);
+        const r = resultSummary(db, res.id);
+        db.log({ action: 'result_received', actor: feed, at: stamp(), summary: `${feed.name} result for ${label}: ${r.text}`,
+          details: { raceId: res.id, ...r.details } });
       }
     });
   }
@@ -289,8 +329,9 @@ function settleHorseBets(db) {
   let settled = 0;
   db.tx(() => {
     const bets = db.prepare(`
-      SELECT b.*, r.status AS race_status, u.withdrawn, u.win_dividend, u.place_dividend
-      FROM horse_bets b JOIN races r ON r.id = b.race_id
+      SELECT b.*, r.status AS race_status, r.meeting, r.race_no, u.horse, u.finish_pos, u.withdrawn, u.win_dividend, u.place_dividend,
+        us.username
+      FROM horse_bets b JOIN races r ON r.id = b.race_id JOIN users us ON us.id = b.user_id
       JOIN runners u ON u.race_id = b.race_id AND u.number = b.runner_no
       WHERE b.status = 'open' AND (r.status != 'open' OR u.withdrawn = 1)`).all();
     for (const b of bets) {
@@ -308,10 +349,16 @@ function settleHorseBets(db) {
       if (payout > 0) {
         db.adjustBalance({ userId: b.user_id, amount: payout, type: status === 'void' ? 'refund' : 'payout', horseBetId: b.id });
       }
+      const outcome = status === 'void' ? `refunded ${(payout / 100).toFixed(2)} (${b.race_status === 'abandoned' ? 'race abandoned' : 'horse withdrawn'})`
+        : status === 'won' ? `won at ${dividend.toFixed(2)}, paid ${(payout / 100).toFixed(2)}` : `lost${b.finish_pos ? `, finished ${b.finish_pos}` : ''}`;
+      db.log({ action: 'bet_settled', userId: b.user_id,
+        summary: `Bet #H${b.id} (${b.username}): ${b.bet_type === 'win' ? 'Win' : 'Place'} ${(b.stake / 100).toFixed(2)} on ${b.runner_no}. ${b.horse}, `
+          + `${raceLabel(b)}: ${outcome}`,
+        details: { betId: `H${b.id}`, status, dividend, payout: payout / 100, position: b.finish_pos } });
       settled++;
     }
   });
   return settled + settleTickets(db);
 }
 
-module.exports = { createRacingService, createDemoProvider, settleHorseBets, recordResult, placesFor };
+module.exports = { createRacingService, createDemoProvider, settleHorseBets, recordResult, placesFor, raceLabel, resultSummary };
