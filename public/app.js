@@ -655,7 +655,7 @@
         <p class="muted small">Leagues: ${s.leagues.map(esc).join(', ')}</p>
         ${s.oddsMode === 'demo' ? '<p class="muted small">Set <code>ODDS_API_KEY</code> on the server to switch to live bookmaker odds from The Odds API.</p>' : ''}
         ${s.lastError ? `<p class="neg small">Last error: ${esc(s.lastError)}</p>` : ''}
-        ${s.racingMode ? `<p>Horse racing feed: <strong>${s.racingMode === 'demo' ? 'Demo (Racing NRC not connected yet)' : esc(s.racingMode)}</strong>,
+        ${s.racingMode ? `<p>Horse racing feed: <strong>${s.racingMode === 'demo' ? 'Demo (simulated races)' : s.racingMode === 'nrc' ? 'Racing NRC (live)' : esc(s.racingMode)}</strong>,
           last refreshed <strong>${s.racingRefreshedAt ? esc(when(s.racingRefreshedAt)) : 'never'}</strong></p>
           ${s.racingLastError ? `<p class="neg small">Racing feed error: ${esc(s.racingLastError)}</p>` : ''}` : ''}
         <button class="btn" id="refresh">Refresh odds &amp; results now</button>

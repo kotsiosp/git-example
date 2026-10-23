@@ -31,9 +31,17 @@ module.exports = {
   oddsRefreshMinutes: Number(process.env.ODDS_REFRESH_MINUTES || 60),
   scoresRefreshMinutes: Number(process.env.SCORES_REFRESH_MINUTES || 30),
 
-  // Cyprus horse racing. Only the demo feed exists until the Racing NRC feed is connected.
+  // Cyprus horse racing: 'nrc' reads Racing NRC (racingnrc.com.cy); 'demo' simulates races.
   racingEnabled: process.env.RACING_ENABLED !== 'false',
+  racingSource: process.env.RACING_SOURCE || 'demo',
   racingRefreshSeconds: Number(process.env.RACING_REFRESH_SECONDS || 60),
+  nrcDbUrl: process.env.NRC_DB_URL || 'https://nicosia-rc.europe-west1.firebasedatabase.app',
+  nrcTracks: list(process.env.NRC_TRACKS, 'CY-NICOSIA-TH'),
+  nrcTimeZone: process.env.NRC_TIME_ZONE || 'Asia/Nicosia',
+  // Days the feed is read (Cyprus racing is on Wednesdays and Sundays); add a day for an extra meeting.
+  nrcRaceDays: list(process.env.NRC_RACE_DAYS, 'wed,sun').map((d) => d.toLowerCase().slice(0, 3)),
+  // Nicosia pays the first two places.
+  nrcPlacesPaid: Number(process.env.NRC_PLACES_PAID || 2),
 
   minStake: Number(process.env.MIN_STAKE || 1),
   maxStake: Number(process.env.MAX_STAKE || 10000),

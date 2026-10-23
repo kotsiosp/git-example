@@ -80,11 +80,15 @@ tote prices. Prices refresh every 30 seconds and freeze at the off.
 - **Withdrawn horse or abandoned race:** the stake is refunded.
 - **Master *Racing* page:** enter a result and its dividends by hand, withdraw a horse, or abandon a race.
 
-**Data source:** the races are currently **demo data**: a simulated Nicosia meeting with a race every 30 minutes,
-moving prices, and results 8 minutes after the off. The plan is to take live prices, results and dividends from
-Racing NRC (racingnrc.com.cy). That connection isn't written yet, because its data format still has to be checked.
-A Racing NRC provider plugs into `src/racing.js` (the expected data shape is documented at the top of that file),
-and nothing else needs to change. Set `RACING_ENABLED=false` to hide horse racing entirely.
+**Data source:** set `RACING_SOURCE=nrc` to use **Racing NRC** (racingnrc.com.cy). The site then reads the Nicosia
+race cards, runners, live Win/Place tote prices, results and official dividends from the GlobalTote database behind
+their website. Only Cyprus races are read (`NRC_TRACKS=CY-NICOSIA-TH`), and only on race days, Wednesday and Sunday
+(`NRC_RACE_DAYS=wed,sun`). On other days it makes no requests at all. It reads whole tracks rather than single races
+and fetches each race's dividends once, after they are confirmed. Nicosia pays two places (`NRC_PLACES_PAID=2`).
+
+This is not a documented public API: Racing NRC can change or close it without notice. If that happens, races stop
+updating and the master can still settle bets from the *Racing* page. Without `RACING_SOURCE=nrc` the site runs
+simulated demo races. Set `RACING_ENABLED=false` to hide horse racing entirely.
 
 ## How bets settle
 
@@ -100,7 +104,8 @@ src/server.js    startup, background refresh timers
 src/app.js       HTTP API (auth, betting, admin)
 src/odds.js      The Odds API client + demo feed
 src/settle.js    result → football bet settlement
-src/racing.js    horse racing feed (demo for now) + tote settlement
+src/racing.js    horse racing service, demo feed + tote settlement
+src/racingNrc.js Racing NRC feed (Nicosia cards, prices, dividends)
 src/racingRoutes.js  horse racing API
 src/db.js        SQLite schema (built into Node, no native modules)
 public/          single-page frontend (no build step)

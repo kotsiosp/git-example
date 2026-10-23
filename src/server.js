@@ -6,6 +6,7 @@ const { createApp, ensureAdmin } = require('./app');
 const { createOddsService } = require('./odds');
 const { settleAll } = require('./settle');
 const { createRacingService, settleHorseBets } = require('./racing');
+const { createNrcProvider } = require('./racingNrc');
 
 const db = open(config.dbFile);
 const created = ensureAdmin(db, config);
@@ -34,9 +35,10 @@ safe(async () => { await oddsTick(); await scoresTick(); })();
 setInterval(safe(oddsTick), oddsEvery);
 setInterval(safe(scoresTick), scoresEvery);
 
-const racing = config.racingEnabled ? createRacingService(db, config) : null;
+const racingProvider = config.racingSource === 'nrc' ? createNrcProvider(config) : undefined;
+const racing = config.racingEnabled ? createRacingService(db, config, { provider: racingProvider }) : null;
 if (racing) {
-  console.log(`Racing feed: ${racing.mode === 'demo' ? 'DEMO (Racing NRC feed not connected yet)' : racing.mode}`);
+  console.log(`Racing feed: ${racing.mode === 'nrc' ? `Racing NRC (${config.nrcTracks.join(', ')})` : 'DEMO (set RACING_SOURCE=nrc for Racing NRC)'}`);
   const racingTick = async () => {
     await racing.refresh();
     const n = settleHorseBets(db);
