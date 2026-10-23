@@ -61,7 +61,11 @@
 
   function modal(html, onSubmit) {
     const wrap = $('#modal');
-    $('#modal-card').innerHTML = html;
+    const card = $('#modal-card');
+    // The card is reused by every dialog: clear what the previous one set up.
+    card.className = 'modal-card';
+    card.onclick = card.onchange = card.oninput = null;
+    card.innerHTML = html;
     wrap.classList.remove('hidden');
     const close = () => wrap.classList.add('hidden');
     wrap.onclick = (e) => { if (e.target === wrap || e.target.dataset.close !== undefined) close(); };
@@ -167,10 +171,12 @@
     const main = $('#view');
     if (!state.user) {
       renderSlip();
+      renderParlay();
       return renderLogin(main);
     }
     const view = currentView();
     renderSlip();
+    renderParlay();
     const views = {
       matches: renderMatches, bets: renderMyBets, results: renderResults, history: renderHistory, account: renderAccount,
       users: renderUsers, allbets: renderAllBets, settle: renderSettle, feed: renderFeed,
@@ -463,14 +469,16 @@
   }
 
   async function renderMyBets(main) {
-    const [{ bets: football }, { bets: horses }] = await Promise.all([
-      api('/bets'), state.config.racingMode ? api('/horse-bets') : { bets: [] }]);
+    const [{ bets: football }, { bets: horses }, { tickets }] = await Promise.all([
+      api('/bets'), state.config.racingMode ? api('/horse-bets') : { bets: [] },
+      state.config.racingMode ? api('/horse-tickets') : { tickets: [] }]);
     await refreshMe();
     renderChrome();
     // Newest first across both sports; SQLite timestamps sort as text.
-    const bets = [...football.map((b) => ({ ...b, kind: 'football' })), ...horses.map((b) => ({ ...b, kind: 'horse' }))]
+    const bets = [...football.map((b) => ({ ...b, sport: 'football' })), ...horses.map((b) => ({ ...b, sport: 'horse' })),
+      ...tickets.map((b) => ({ ...b, sport: 'ticket' }))]
       .sort((a, b) => (b.placedAt > a.placedAt ? 1 : b.placedAt < a.placedAt ? -1 : b.id - a.id));
-    const card = (b) => (b.kind === 'horse' ? horseBetCard(b) : betCard(b));
+    const card = (b) => (b.sport === 'horse' ? horseBetCard(b) : b.sport === 'ticket' ? ticketCard(b) : betCard(b));
     const open = bets.filter((b) => b.status === 'open');
     const settled = bets.filter((b) => b.status !== 'open');
     main.innerHTML = `<h1>My bets</h1>
@@ -493,7 +501,7 @@
     const label = { credit: 'Credit from host', debit: 'Debit by host', bet: 'Bet placed', payout: 'Winnings', refund: 'Refund (void)' };
     return `<div class="card table-wrap"><table><thead><tr><th>Date</th><th>Type</th><th>Details</th><th class="num">Amount</th><th class="num">Balance</th></tr></thead><tbody>
       ${txs.map((t) => `<tr><td class="muted">${esc(sqlDate(t.createdAt))}</td><td>${esc(label[t.type] || t.type)}</td>
-        <td class="muted">${t.betId ? `Bet #${t.betId}` : ''}${t.horseBetId ? `Horse bet #${t.horseBetId}` : ''}${t.note ? esc(t.note) : ''}</td>
+        <td class="muted">${t.betId ? `Bet #${t.betId}` : ''}${t.horseBetId ? `Horse bet #H${t.horseBetId}` : ''}${t.horseTicketId ? `Horse bet #T${t.horseTicketId}` : ''}${t.note ? esc(t.note) : ''}</td>
         <td class="num ${t.amount > 0 ? 'pos' : 'neg'}">${t.amount > 0 ? '+' : ''}${fmt(t.amount)}</td><td class="num">${fmt(t.balanceAfter)}</td></tr>`).join('')}
     </tbody></table></div>`;
   }
@@ -739,7 +747,8 @@
       html += `<div class="race card">
         <div class="race-head"><div><strong>${raceTitle(r)}</strong> · ${esc(timeOnly(r.postTime))}
           <div class="muted small">${esc(r.name || '')}${r.distance ? ` · ${esc(r.distance)}` : ''} · ${placeTerms(r.placesPaid)}</div></div>
-          <span class="countdown">${startsIn(r.postTime)}</span></div>
+          <div class="race-actions"><span class="countdown">${startsIn(r.postTime)}</span>
+            ${r.pools?.length ? `<button class="btn ghost small" data-exotic="${esc(r.id)}">More bets</button>` : ''}</div></div>
         <div class="runner runner-head"><span>#</span><span>Horse / jockey</span><span>Win</span><span>Place</span></div>
         ${r.runners.map((u) => {
           const key = `${r.id}|${u.number}`;
@@ -770,6 +779,7 @@
           ${placed.map((u) => `<tr><td>${ordinal(u.position)}</td><td>${u.number}. ${esc(u.horse)} <span class="muted small">${esc(u.jockey || '')}</span></td>
             <td class="num">${u.winDividend ? odd(u.winDividend) : ''}</td><td class="num">${u.placeDividend ? odd(u.placeDividend) : ''}</td></tr>`).join('')}
           </tbody></table></div>
+          ${r.dividends?.length ? `<p class="small dividends">${[...r.dividends].sort((a, b) => POOL_ORDER.indexOf(a.pool) - POOL_ORDER.indexOf(b.pool)).map((d) => `<span><span class="muted">${POOL_INFO[d.pool]?.name || esc(d.pool)}</span> ${esc(d.combo)} <strong>${odd(d.dividend)}</strong></span>`).join('')}</p>` : ''}
           ${r.runners.some((u) => u.withdrawn) ? `<p class="muted small">Withdrawn: ${r.runners.filter((u) => u.withdrawn).map((u) => `${u.number}. ${esc(u.horse)}`).join(', ')}</p>` : ''}`}
       </div>`;
     }).join('') : '<div class="empty-state">No race results in the last few days.</div>'}`;
@@ -780,6 +790,12 @@
     if (tab) {
       state.horseTab = tab.dataset.horseTab;
       render();
+      return;
+    }
+    const exotic = e.target.closest('[data-exotic]');
+    if (exotic) {
+      const race = state.races.find((r) => r.id === exotic.dataset.exotic);
+      if (race) openExoticBet(race);
       return;
     }
     const btn = e.target.closest('.odd[data-race]');
@@ -803,7 +819,8 @@
         <div id="hb-summary"></div>
         <p class="muted small">Tote bet: the price shown is the current guide. If the horse wins or places you're paid the official final dividend, which can be higher or lower. Withdrawn horse or abandoned race = stake refunded.</p>
         <div class="error"></div>
-        <div class="modal-actions"><button type="button" class="btn ghost" data-close>Cancel</button><button class="btn" type="submit">Place bet</button></div>
+        <div class="modal-actions"><button type="button" class="btn ghost" data-close>Cancel</button>
+          <button type="button" class="btn ghost" id="hb-parlay">Add to parlay</button><button class="btn" type="submit">Place bet</button></div>
       </form>`, async (f) => {
       const res = await api('/horse-bets', { raceId: race.id, runnerNo: runner.number, betType: type, stake: Number(f.stake) });
       state.user.balance = res.balance;
@@ -813,6 +830,7 @@
     const stakeEl = $('#hb-stake');
     const update = () => {
       document.querySelectorAll('#hb-types button').forEach((b) => b.classList.toggle('active', b.dataset.t === type));
+      $('#hb-parlay').hidden = type === 'each_way';
       const stake = Number(stakeEl.value) || 0;
       const rows = [];
       if (type === 'each_way') {
@@ -827,6 +845,10 @@
       $('#hb-summary').innerHTML = rows.map(([k, v, c]) => `<div class="summary"><span>${k}</span><strong class="${c}">${v}</strong></div>`).join('');
     };
     $('#hb-types').onclick = (e) => { if (e.target.dataset.t) { type = e.target.dataset.t; update(); } };
+    $('#hb-parlay').onclick = () => {
+      addParlayLeg(race, runner, type === 'place' ? 'place' : 'win');
+      $('#modal').classList.add('hidden');
+    };
     document.querySelectorAll('[data-q]').forEach((b) => { b.onclick = () => { stakeEl.value = b.dataset.q; update(); }; });
     stakeEl.oninput = update;
     update();
@@ -848,8 +870,237 @@
     </div>`;
   }
 
+
+  // ---------------------------------------------------------------- exotic bets
+
+  const POOL_INFO = {
+    EXACTA: { name: 'Forecast', picks: 2, ordered: true, about: 'Pick 1st and 2nd in the right order.' },
+    QUINELLA: { name: 'Twin', picks: 2, ordered: false, about: 'Pick the first two, in any order.' },
+    SWINGER: { name: 'Omni', picks: 2, ordered: false, about: 'Pick two horses that both finish in the top 3, in any order.' },
+    TRIFECTA: { name: 'Trio', picks: 3, ordered: true, about: 'Pick 1st, 2nd and 3rd in the right order.' },
+    SUPERFECTA: { name: 'Tetracast', picks: 4, ordered: true, about: 'Pick the first four in the right order.' },
+  };
+  const POOL_ORDER = ['EXACTA', 'QUINELLA', 'SWINGER', 'TRIFECTA', 'SUPERFECTA'];
+  const MODE_LABEL = { straight: 'Straight', reverse: 'Reverse', box: 'Box', banker: 'Banker' };
+  const POSITION_LABEL = ['1st', '2nd', '3rd', '4th'];
+
+  function permutations(items, size) {
+    if (size === 0) return [[]];
+    return items.flatMap((x, i) => permutations([...items.slice(0, i), ...items.slice(i + 1)], size - 1).map((rest) => [x, ...rest]));
+  }
+
+  // Mirrors the server's expansion, to show the number of combinations and the cost before betting.
+  function countCombos(pool, mode, sel) {
+    const info = POOL_INFO[pool];
+    let combos = [];
+    if (mode === 'straight') {
+      if (sel.positions.some((p) => !p.length)) return 0;
+      combos = sel.positions.reduce((acc, ch) => acc.flatMap((c) => ch.filter((n) => !c.includes(n)).map((n) => [...c, n])), [[]]);
+    } else if (mode === 'reverse') {
+      combos = sel.horses.length === 2 ? permutations(sel.horses, 2) : [];
+    } else if (mode === 'box') {
+      combos = sel.horses.length >= info.picks ? permutations(sel.horses, info.picks) : [];
+    } else if (mode === 'banker') {
+      const others = sel.with.filter((n) => n !== sel.banker);
+      combos = sel.banker && others.length >= info.picks - 1 ? permutations(others, info.picks - 1).map((r) => [sel.banker, ...r]) : [];
+    }
+    const key = (c) => (info.ordered ? c : [...c].sort((a, b) => a - b)).join('-');
+    return new Set(combos.filter((c) => c.length === info.picks).map(key)).size;
+  }
+
+  function openExoticBet(race) {
+    const pools = POOL_ORDER.filter((p) => race.pools.includes(p));
+    const runners = race.runners.filter((u) => !u.withdrawn);
+    const st = { pool: pools[0], mode: 'straight', pos: [], picks: new Set(), banker: null, unit: '1' };
+    const modesFor = (p) => (p === 'EXACTA' ? ['straight', 'reverse', 'box', 'banker'] : ['straight', 'box', 'banker']);
+    const resetPicks = () => { st.pos = Array.from({ length: POOL_INFO[st.pool].picks }, () => new Set()); st.picks = new Set(); st.banker = null; };
+    resetPicks();
+
+    // What the player picked, in the shape the server expects.
+    const selection = () => {
+      const info = POOL_INFO[st.pool];
+      const picks = [...st.picks];
+      if (st.mode === 'straight' && info.ordered) return { positions: st.pos.map((s) => [...s]) };
+      if (st.mode === 'straight') return { positions: picks.length === 2 ? [[picks[0]], [picks[1]]] : [[], []] };
+      if (st.mode === 'banker') return { banker: st.banker, with: picks };
+      return { horses: picks };
+    };
+    const countSel = () => {
+      const sel = selection();
+      return countCombos(st.pool, st.mode, { positions: sel.positions || [], horses: sel.horses || [], banker: sel.banker, with: sel.with || [] });
+    };
+
+    modal(`<h3>More bets · ${raceTitle(race)}</h3>
+      <p class="muted small">${esc(timeOnly(race.postTime))} · paid at the official dividend · combinations with a withdrawn horse are refunded</p>
+      <form><div id="ex-body"></div><div class="error"></div>
+        <div class="modal-actions"><button type="button" class="btn ghost" data-close>Cancel</button><button class="btn" type="submit" id="ex-submit">Place bet</button></div>
+      </form>`, async () => {
+      const res = await api('/horse-tickets', { kind: 'exotic', raceId: race.id, pool: st.pool, mode: st.mode, selections: selection(), unitStake: Number(st.unit) });
+      state.user.balance = res.balance;
+      renderChrome();
+      toast(`${POOL_INFO[st.pool].name} placed — good luck!`);
+    });
+    $('#modal-card').classList.add('wide');
+
+    const draw = () => {
+      const info = POOL_INFO[st.pool];
+      const cols = st.mode === 'straight' && info.ordered ? POSITION_LABEL.slice(0, info.picks)
+        : st.mode === 'banker' ? ['Banker', 'With'] : [st.mode === 'box' ? 'Box' : 'Pick 2'];
+      const cell = (u, c, i) => {
+        if (st.mode === 'straight' && info.ordered) return `<input type="checkbox" data-pos="${i}" data-n="${u.number}" ${st.pos[i].has(u.number) ? 'checked' : ''} aria-label="${c} ${esc(u.horse)}">`;
+        if (st.mode === 'banker' && c === 'Banker') return `<input type="radio" name="banker" data-banker="${u.number}" ${st.banker === u.number ? 'checked' : ''} aria-label="Banker ${esc(u.horse)}">`;
+        return `<input type="checkbox" data-pick="${u.number}" ${st.picks.has(u.number) && st.banker !== u.number ? 'checked' : ''} ${st.mode === 'banker' && st.banker === u.number ? 'disabled' : ''} aria-label="${c} ${esc(u.horse)}">`;
+      };
+      const n = countSel();
+      const unit = Number(st.unit) || 0;
+      const hint = st.mode === 'straight' ? (info.ordered ? 'Tick one or more horses for each place.' : 'Tick exactly 2 horses.')
+        : st.mode === 'reverse' ? 'Tick 2 horses: you get both orders (2 bets).'
+          : st.mode === 'box' ? `Tick ${info.picks} or more horses: every order is covered.`
+            : `Pick a banker${info.ordered ? ' to finish 1st' : ''}, then tick the horses to go with it.`;
+      $('#ex-body').innerHTML = `
+        <div class="tabs pools">${pools.map((p) => `<button type="button" data-pool="${p}" class="${p === st.pool ? 'active' : ''}">${POOL_INFO[p].name}</button>`).join('')}</div>
+        <p class="small">${info.about}</p>
+        <div class="chips">${modesFor(st.pool).map((m) => `<button type="button" class="chip ${m === st.mode ? 'active' : ''}" data-mode="${m}">${MODE_LABEL[m]}</button>`).join('')}</div>
+        <p class="muted small">${hint}</p>
+        <div class="table-wrap pick-grid"><table><thead><tr><th>Horse</th>${cols.map((c) => `<th class="c">${c}</th>`).join('')}</tr></thead><tbody>
+          ${runners.map((u) => `<tr><td><strong>${u.number}.</strong> ${esc(u.horse)} <span class="muted small">${u.winPrice ? odd(u.winPrice) : ''}</span></td>
+            ${cols.map((c, i) => `<td class="c">${cell(u, c, i)}</td>`).join('')}</tr>`).join('')}
+        </tbody></table></div>
+        <label for="ex-unit">Stake per combination (${esc(state.config.currency)})</label>
+        <input id="ex-unit" type="number" inputmode="decimal" min="1" step="0.01" value="${esc(st.unit)}">
+        <div class="summary"><span>Combinations</span><strong>${n}</strong></div>
+        <div class="summary"><span>Total cost</span><strong>${fmt(n * unit)}</strong></div>`;
+      $('#ex-submit').disabled = !n || unit < 1;
+    };
+
+    const body = () => $('#ex-body');
+    $('#modal-card').onclick = (e) => {
+      const t = e.target;
+      if (!body()?.contains(t)) return;
+      if (t.dataset.pool) { st.pool = t.dataset.pool; if (!modesFor(st.pool).includes(st.mode)) st.mode = 'straight'; resetPicks(); draw(); }
+      else if (t.dataset.mode) { st.mode = t.dataset.mode; resetPicks(); draw(); }
+    };
+    $('#modal-card').onchange = (e) => {
+      const t = e.target;
+      if (t.dataset.pos) { const s = st.pos[Number(t.dataset.pos)]; const n = Number(t.dataset.n); t.checked ? s.add(n) : s.delete(n); }
+      else if (t.dataset.banker) { st.banker = Number(t.dataset.banker); st.picks.delete(st.banker); }
+      else if (t.dataset.pick) { const n = Number(t.dataset.pick); t.checked ? st.picks.add(n) : st.picks.delete(n); }
+      else return;
+      draw();
+    };
+    $('#modal-card').oninput = (e) => {
+      if (e.target.id !== 'ex-unit') return;
+      st.unit = e.target.value;
+      const n = countSel();
+      const unit = Number(st.unit) || 0;
+      body().querySelectorAll('.summary strong')[1].textContent = fmt(n * unit);
+      $('#ex-submit').disabled = !n || unit < 1;
+    };
+    draw();
+  }
+
+  // ---------------------------------------------------------------- parlays
+
+  state.parlay = (() => { try { return JSON.parse(localStorage.getItem('pb_parlay')) || []; } catch { return []; } })();
+  state.parlayStake = '';
+  const saveParlay = () => { try { localStorage.setItem('pb_parlay', JSON.stringify(state.parlay)); } catch { /* storage unavailable */ } };
+
+  function addParlayLeg(race, runner, betType) {
+    // One horse per race: picking another horse in the same race replaces it.
+    state.parlay = state.parlay.filter((l) => l.raceId !== race.id);
+    state.parlay.push({ raceId: race.id, raceNo: race.raceNo, meeting: race.meeting, postTime: race.postTime,
+      runnerNo: runner.number, horse: runner.horse, betType, price: betType === 'win' ? runner.winPrice : runner.placePrice });
+    state.parlay.sort((a, b) => (a.postTime < b.postTime ? -1 : 1));
+    saveParlay();
+    renderParlay();
+    toast(`${runner.horse} added to your parlay`);
+  }
+
+  function renderParlay() {
+    const el = $('#parlay');
+    // Legs whose race has started can no longer be bet.
+    state.parlay = state.parlay.filter((l) => Date.parse(l.postTime) > Date.now());
+    const show = state.user?.role === 'user' && state.parlay.length > 0 && currentView() === 'horses';
+    el.classList.toggle('hidden', !show);
+    document.body.classList.toggle('has-parlay', show);
+    if (!show) return;
+    const stake = Number(state.parlayStake) || 0;
+    const guide = state.parlay.reduce((acc, l) => acc * (l.price || 1), 1);
+    el.innerHTML = `
+      <div class="slip-head"><h3>Parlay <span class="count">${state.parlay.length}</span></h3>
+        <button class="btn ghost small" id="parlay-clear">Clear</button></div>
+      <p class="muted small">One horse in each race. Winnings roll on to the next leg; a withdrawn horse counts as 1.00, a loser ends the parlay.</p>
+      ${state.parlay.map((l, i) => `<div class="sel">
+        <div class="pick">${l.runnerNo}. ${esc(l.horse)}</div><div class="price">${l.price ? odd(l.price) : '–'}</div>
+        <div class="meta">${BET_TYPE_LABEL[l.betType]} · ${esc(l.meeting)} race ${l.raceNo} · ${esc(timeOnly(l.postTime))}</div>
+        <button class="remove" data-parlay-remove="${i}">Remove</button></div>`).join('')}
+      ${state.parlay.length < 2 ? '<p class="muted small">Add a horse from another race to make a parlay.</p>' : ''}
+      <label for="parlay-stake">Stake (${esc(state.config.currency)})</label>
+      <input id="parlay-stake" type="number" inputmode="decimal" min="${state.config.minStake}" step="0.01" value="${esc(state.parlayStake)}" placeholder="0.00">
+      <div class="quick">${[5, 10, 25, 50].map((v) => `<button class="btn ghost small" data-parlay-quick="${v}">${v}</button>`).join('')}</div>
+      <div class="summary"><span>Prices multiplied (guide)</span><strong>${odd(guide)}</strong></div>
+      <div class="summary"><span>Estimated return</span><strong class="pos">${fmt(stake * guide)}</strong></div>
+      <button class="btn block" id="parlay-place" ${stake > 0 && state.parlay.length >= 2 ? '' : 'disabled'}>Place parlay</button>
+      <p class="muted small">Paid at the official dividends, which can differ from the prices shown.</p>
+      <div class="error" id="parlay-error"></div>`;
+  }
+
+  $('#parlay').addEventListener('click', async (e) => {
+    const t = e.target;
+    if (t.id === 'parlay-clear') { state.parlay = []; saveParlay(); renderParlay(); return; }
+    if (t.dataset.parlayRemove !== undefined) { state.parlay.splice(Number(t.dataset.parlayRemove), 1); saveParlay(); renderParlay(); return; }
+    if (t.dataset.parlayQuick) { state.parlayStake = t.dataset.parlayQuick; renderParlay(); return; }
+    if (t.id !== 'parlay-place') return;
+    t.disabled = true;
+    try {
+      const res = await api('/horse-tickets', { kind: 'parlay', stake: Number(state.parlayStake),
+        legs: state.parlay.map(({ raceId, runnerNo, betType }) => ({ raceId, runnerNo, betType })) });
+      state.user.balance = res.balance;
+      state.parlay = [];
+      saveParlay();
+      renderChrome();
+      renderParlay();
+      toast('Parlay placed — good luck!');
+    } catch (err) {
+      renderParlay();
+      $('#parlay-error').textContent = err.message;
+    }
+  });
+  $('#parlay').addEventListener('input', (e) => {
+    if (e.target.id !== 'parlay-stake') return;
+    state.parlayStake = e.target.value;
+    const stake = Number(state.parlayStake) || 0;
+    const guide = state.parlay.reduce((acc, l) => acc * (l.price || 1), 1);
+    $('#parlay').querySelectorAll('.summary strong')[1].textContent = fmt(stake * guide);
+    $('#parlay-place').disabled = !(stake > 0 && state.parlay.length >= 2);
+  });
+
+  function ticketCard(t, showUser = false) {
+    const head = t.kind === 'parlay' ? `${t.legs.length}-race parlay` : `${t.poolName} · ${MODE_LABEL[t.mode] || ''}`;
+    const name = (n) => (t.horses?.[n] ? `${n}. ${esc(t.horses[n])}` : String(n));
+    let body;
+    if (t.kind === 'parlay') {
+      body = t.legs.map((l) => `<div class="leg"><div><strong>${l.runnerNo}. ${esc(l.horse)}</strong> · ${BET_TYPE_LABEL[l.betType]}
+          <div class="muted small">${esc(l.meeting)} race ${l.raceNo} · ${esc(when(l.postTime))}${l.priceAtBet ? ` · price when placed ${odd(l.priceAtBet)}` : ''}</div></div>
+        <div class="r">${l.position ? `<span class="muted">${ordinal(l.position)}</span> ` : ''}${l.dividend ? `<span class="muted">${odd(l.dividend)}</span> ` : ''}<span class="badge ${l.result}">${l.result === 'pending' ? 'open' : l.result}</span></div></div>`).join('');
+    } else {
+      const shown = t.combos.length <= 6 ? t.combos : t.combos.filter((c) => c.result === 'won');
+      body = `<div class="leg"><div><div class="muted small">${esc(t.meeting)} · Race ${t.raceNo} · ${esc(when(t.postTime))}</div>
+          ${shown.map((c) => `<div>${c.combo.split('-').map((n) => name(Number(n))).join(' → ')}${c.result !== 'pending' ? ` <span class="badge ${c.result}">${c.result}</span>` : ''}${c.dividend ? ` <span class="muted">${odd(c.dividend)}</span>` : ''}</div>`).join('')}
+          ${t.combos.length > shown.length ? `<div class="muted small">${t.combos.length} combinations${shown.length ? `, ${shown.length} won` : ''}</div>` : ''}</div></div>`;
+    }
+    return `<div class="card bet">
+      <div class="bet-top"><div><strong>🐎 ${esc(head)}</strong> <span class="muted small">#T${t.id}${showUser ? ` · ${esc(t.username)}` : ''} · ${esc(sqlDate(t.placedAt))}</span></div>
+        <span class="badge ${t.status}">${t.status}</span></div>
+      ${body}
+      <div class="bet-foot">${t.kind === 'exotic' ? `<span>${t.lines} × <strong>${fmt(t.unitStake)}</strong></span>` : ''}<span>Stake <strong>${fmt(t.stake)}</strong></span>
+        ${t.status === 'open' ? '<span>Pays the official dividend</span>' : `<span>Returned <strong class="${t.payout > 0 ? 'pos' : ''}">${fmt(t.payout)}</strong></span>`}</div>
+    </div>`;
+  }
+
   async function renderRacingAdmin(main) {
-    const [{ pending, upcoming }, { bets }] = await Promise.all([api('/admin/races'), api('/admin/horse-bets?status=open')]);
+    const [{ pending, upcoming }, { bets }, { tickets }] = await Promise.all([api('/admin/races'),
+      api('/admin/horse-bets?status=open'), api('/admin/horse-tickets?status=open')]);
     const all = [...pending, ...upcoming];
     main.innerHTML = `<h1>Racing</h1>
       <p class="muted">Results and dividends normally arrive from the racing feed and bets settle by themselves. Use this page when a result is late or wrong, a horse is withdrawn, or a race is abandoned.</p>
@@ -865,8 +1116,9 @@
           <td class="num">${r.openBets}</td><td><div class="actions"><button class="btn ghost small" data-withdraw="${esc(r.id)}">Withdraw a horse</button>
           <button class="btn danger small" data-abandon="${esc(r.id)}">Abandon</button></div></td></tr>`).join('')}
       </tbody></table></div>` : '<div class="empty-state">No upcoming races.</div>'}
-      <h2>Open horse bets (${bets.length})</h2>
-      ${bets.length ? bets.map((b) => horseBetCard(b, true)).join('') : '<div class="empty-state">No open horse bets.</div>'}`;
+      <h2>Open horse bets (${bets.length + tickets.length})</h2>
+      ${bets.length + tickets.length ? [...bets.map((b) => horseBetCard(b, true)), ...tickets.map((t) => ticketCard(t, true))].join('')
+    : '<div class="empty-state">No open horse bets.</div>'}`;
 
     const byId = Object.fromEntries(all.map((r) => [r.id, r]));
     const done = (r) => { toast(`${r.settledBets} bet(s) settled`); render(); };
@@ -899,9 +1151,17 @@
             <td><input name="win_${u.number}" type="number" step="0.01" min="1" class="mini"></td>
             <td><input name="place_${u.number}" type="number" step="0.01" min="1" class="mini" ${r.placesPaid ? '' : 'disabled'}></td></tr>`).join('')}
           </tbody></table></div>
+          ${r.pools?.length ? `<p class="muted small">Other bets: enter each winning combination in finishing order (e.g. 6-9-3) and its dividend. A bet type left empty is refunded.</p>
+            <div class="table-wrap"><table><thead><tr><th>Bet</th><th>Combination</th><th>Dividend</th></tr></thead><tbody>
+            ${r.pools.flatMap((p) => Array.from({ length: p === 'SWINGER' ? 3 : 1 }, (_, i) => `<tr><td>${POOL_INFO[p].name}</td>
+              <td><input name="combo_${p}_${i}" class="mini" placeholder="${Array.from({ length: POOL_INFO[p].picks }, (__, k) => k + 1).join('-')}"></td>
+              <td><input name="div_${p}_${i}" type="number" step="0.01" min="1" class="mini"></td></tr>`)).join('')}
+            </tbody></table></div>` : ''}
           <div class="error"></div><div class="modal-actions"><button type="button" class="btn ghost" data-close>Cancel</button><button class="btn" type="submit">Save result &amp; settle</button></div></form>`,
         async (f) => done(await api(`/admin/races/${encodeURIComponent(r.id)}/result`, {
           runners: runners.map((u) => ({ number: u.number, position: f[`pos_${u.number}`], winDividend: f[`win_${u.number}`], placeDividend: f[`place_${u.number}`] })),
+          pools: Object.fromEntries((r.pools || []).map((p) => [p, Object.fromEntries(Array.from({ length: p === 'SWINGER' ? 3 : 1 }, (_, i) => [f[`combo_${p}_${i}`], f[`div_${p}_${i}`]])
+            .filter(([c, d]) => c && d))])),
         })));
       };
     });

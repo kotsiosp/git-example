@@ -23,7 +23,7 @@ body {
   display: flex;
   flex-direction: column;
 }
-.hidden { display: none !important; }
+.hidden, [hidden] { display: none !important; }
 button, input, select { font: inherit; color: inherit; }
 a { color: var(--accent); }
 
@@ -215,3 +215,15 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .odd:disabled { cursor: default; color: var(--muted); }
 input.mini { width: 80px; padding: 5px 8px; }
 @media (max-width: 640px) { .runner { grid-template-columns: 22px 1fr 54px 54px; padding: 8px 10px; } }
+
+/* exotic bets and parlays */
+.race-actions { display: flex; align-items: center; gap: 10px; }
+.modal-card.wide { max-width: 560px; }
+.tabs.pools { flex-wrap: wrap; }
+.pick-grid { max-height: 46vh; overflow: auto; margin-top: 4px; }
+.pick-grid td, .pick-grid th { padding: 6px 8px; }
+.pick-grid .c { text-align: center; width: 64px; }
+.pick-grid input { width: 20px; height: 20px; accent-color: var(--accent); }
+.dividends { display: flex; flex-wrap: wrap; gap: 6px 16px; padding: 0 14px; }
+body.has-parlay main { padding-right: 360px; }
+@media (max-width: 900px) { body.has-parlay main { padding-right: 20px; padding-bottom: 160px; } }

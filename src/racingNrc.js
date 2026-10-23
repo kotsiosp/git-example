@@ -7,7 +7,10 @@
 // To stay light on their service it reads whole tracks (not single races), refreshes cards and
 // runners only every few minutes, and fetches a race's dividends once, after the result is confirmed.
 
+const { POOLS, comboFromFeed } = require('./tote');
+
 const DAY_MS = 86400 * 1000;
+const poolTypeOf = (key) => String(key).split('|')[2];
 
 // The racing day in Cyprus, as the YYYYMMDD key the feed uses.
 function localDateKey(ms, timeZone) {
@@ -81,7 +84,8 @@ function createNrcProvider(config, { fetchImpl = fetch, now = () => Date.now() }
             const livePrices = prices[key] || {};
             const win = poolOf(livePrices, 'WIN');
             const place = poolOf(livePrices, 'PLACE');
-            const hasPlacePool = Object.keys(r.tenantPools || {}).some((k) => k.split('|')[2] === 'PLACE');
+            const offered = Object.entries(r.tenantPools || {}).filter(([, v]) => v?.enabled !== false).map(([k]) => poolTypeOf(k));
+            const hasPlacePool = offered.includes('PLACE');
             cards.push({
               id: raceId(date, track, no),
               meeting: r.trackName || track,
@@ -91,6 +95,7 @@ function createNrcProvider(config, { fetchImpl = fetch, now = () => Date.now() }
               distance: r.distance ? `${r.distance}m` : null,
               // Shown to players as the place terms; settlement always follows the official place payout.
               placesPaid: hasPlacePool ? config.nrcPlacesPaid : 0,
+              pools: offered.filter((p) => POOLS[p]),
               runners: field
                 .map((u) => {
                   const number = Number(u.programNo);
@@ -139,9 +144,17 @@ function createNrcProvider(config, { fetchImpl = fetch, now = () => Date.now() }
         const numbers = new Set([...Object.values(runners[`R_${Number(no)}`] || {}).map((u) => Number(u.programNo)),
           ...order, ...Object.keys(win.payoff).map(Number)]);
         const withdrawn = new Set(Object.values(runners[`R_${Number(no)}`] || {}).filter(isWithdrawn).map((u) => Number(u.programNo)));
+        // Exotic dividends, only for pools that published a winning combination.
+        const exotic = {};
+        for (const p of Object.values(pools || {})) {
+          if (!p || !POOLS[p.poolType] || !p.resultConfirmed || !p.payoff || typeof p.payoff !== 'object') continue;
+          const combos = Object.entries(p.payoff).filter(([, v]) => typeof v === 'number' && v > 0);
+          if (combos.length) exotic[p.poolType] = Object.fromEntries(combos.map(([k, v]) => [comboFromFeed(p.poolType, k), v]));
+        }
         out.push({
           id,
           abandoned: false,
+          pools: exotic,
           runners: [...numbers].filter(Number.isInteger).map((n) => ({
             number: n,
             withdrawn: withdrawn.has(n),

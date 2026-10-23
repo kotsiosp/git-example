@@ -266,7 +266,7 @@ function createApp({ db, config, odds, racing, now = () => Date.now() }) {
   function transactions(userId) {
     return db.prepare('SELECT * FROM transactions WHERE user_id = ? ORDER BY id DESC LIMIT 300').all(userId).map((t) => ({
       id: t.id, amount: fromCents(t.amount), balanceAfter: fromCents(t.balance_after), type: t.type, betId: t.bet_id,
-      horseBetId: t.horse_bet_id, note: t.note, createdAt: t.created_at,
+      horseBetId: t.horse_bet_id, horseTicketId: t.horse_ticket_id, note: t.note, createdAt: t.created_at,
     }));
   }
 
@@ -286,9 +286,11 @@ function createApp({ db, config, odds, racing, now = () => Date.now() }) {
   admin.get('/users', (req, res) => {
     const rows = db.prepare(`SELECT u.*,
         (SELECT COUNT(*) FROM bets b WHERE b.user_id = u.id)
-          + (SELECT COUNT(*) FROM horse_bets h WHERE h.user_id = u.id) AS bet_count,
+          + (SELECT COUNT(*) FROM horse_bets h WHERE h.user_id = u.id)
+          + (SELECT COUNT(*) FROM horse_tickets h WHERE h.user_id = u.id) AS bet_count,
         (SELECT COALESCE(SUM(stake), 0) FROM bets b WHERE b.user_id = u.id AND b.status = 'open')
-          + (SELECT COALESCE(SUM(stake), 0) FROM horse_bets h WHERE h.user_id = u.id AND h.status = 'open') AS open_stake
+          + (SELECT COALESCE(SUM(stake), 0) FROM horse_bets h WHERE h.user_id = u.id AND h.status = 'open')
+          + (SELECT COALESCE(SUM(stake), 0) FROM horse_tickets h WHERE h.user_id = u.id AND h.status = 'open') AS open_stake
       FROM users u WHERE role = 'user' ORDER BY u.username`).all();
     res.json({ users: rows.map((u) => ({ ...publicUser(u), betCount: u.bet_count, openStake: fromCents(u.open_stake) })) });
   });
@@ -385,7 +387,8 @@ function createApp({ db, config, odds, racing, now = () => Date.now() }) {
       upcomingEvents: count(`SELECT COUNT(*) AS n FROM events WHERE commence_time > '${new Date(now()).toISOString()}' AND completed = 0 AND voided = 0`),
       users: count("SELECT COUNT(*) AS n FROM users WHERE role = 'user'"),
       openBets: count("SELECT COUNT(*) AS n FROM bets WHERE status = 'open'")
-        + count("SELECT COUNT(*) AS n FROM horse_bets WHERE status = 'open'"),
+        + count("SELECT COUNT(*) AS n FROM horse_bets WHERE status = 'open'")
+        + count("SELECT COUNT(*) AS n FROM horse_tickets WHERE status = 'open'"),
       racingMode: racing ? racing.mode : null,
       racingRefreshedAt: db.getMeta('racing_refreshed_at'),
       racingLastError: db.getMeta('racing_last_error'),

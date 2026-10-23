@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS transactions (
   type TEXT NOT NULL,                          -- credit | debit | bet | payout | refund
   bet_id INTEGER,
   horse_bet_id INTEGER,
+  horse_ticket_id INTEGER,
   note TEXT,
   by_user_id INTEGER,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -92,7 +93,8 @@ CREATE TABLE IF NOT EXISTS races (
   distance TEXT,
   places_paid INTEGER NOT NULL DEFAULT 3,      -- 0 = no place betting
   status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'result', 'abandoned')),
-  prices_updated_at TEXT
+  prices_updated_at TEXT,
+  pools TEXT                                   -- JSON list of exotic pools offered, e.g. ["EXACTA","QUINELLA"]
 );
 CREATE INDEX IF NOT EXISTS races_time ON races(post_time);
 
@@ -131,6 +133,62 @@ CREATE TABLE IF NOT EXISTS horse_bets (
 CREATE INDEX IF NOT EXISTS horse_bets_user ON horse_bets(user_id, id);
 CREATE INDEX IF NOT EXISTS horse_bets_race ON horse_bets(race_id, status);
 
+-- Official dividends for exotic pools, per winning combination ("6-9" in order; sorted for Twin/Omni).
+CREATE TABLE IF NOT EXISTS race_dividends (
+  race_id TEXT NOT NULL REFERENCES races(id) ON DELETE CASCADE,
+  pool TEXT NOT NULL,
+  combo TEXT NOT NULL,
+  dividend REAL NOT NULL,
+  PRIMARY KEY (race_id, pool, combo)
+);
+-- Pools whose result was published. A pool without one (nobody won, or no data) refunds its bets.
+CREATE TABLE IF NOT EXISTS race_pool_results (
+  race_id TEXT NOT NULL REFERENCES races(id) ON DELETE CASCADE,
+  pool TEXT NOT NULL,
+  PRIMARY KEY (race_id, pool)
+);
+
+-- Exotic bets (Forecast, Twin, Omni, Trio, Tetracast) and parlays. One ticket can cover many
+-- combinations (a box or banker), each costing the unit stake.
+CREATE TABLE IF NOT EXISTS horse_tickets (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  kind TEXT NOT NULL CHECK (kind IN ('exotic', 'parlay')),
+  race_id TEXT REFERENCES races(id),           -- exotic only
+  pool TEXT,                                   -- exotic only: EXACTA, QUINELLA, SWINGER, TRIFECTA, SUPERFECTA
+  mode TEXT,                                   -- exotic only: straight, reverse, box, banker
+  selections TEXT,                             -- JSON, as chosen (for display)
+  unit_stake INTEGER NOT NULL,
+  lines INTEGER NOT NULL,
+  stake INTEGER NOT NULL,                      -- unit_stake * lines
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'won', 'lost', 'void')),
+  payout INTEGER NOT NULL DEFAULT 0,
+  placed_at TEXT NOT NULL DEFAULT (datetime('now')),
+  settled_at TEXT
+);
+CREATE INDEX IF NOT EXISTS horse_tickets_user ON horse_tickets(user_id, id);
+
+CREATE TABLE IF NOT EXISTS horse_ticket_lines (
+  id INTEGER PRIMARY KEY,
+  ticket_id INTEGER NOT NULL REFERENCES horse_tickets(id) ON DELETE CASCADE,
+  combo TEXT NOT NULL,
+  result TEXT NOT NULL DEFAULT 'pending' CHECK (result IN ('pending', 'won', 'lost', 'void')),
+  dividend REAL
+);
+CREATE INDEX IF NOT EXISTS horse_ticket_lines_ticket ON horse_ticket_lines(ticket_id);
+
+CREATE TABLE IF NOT EXISTS horse_parlay_legs (
+  id INTEGER PRIMARY KEY,
+  ticket_id INTEGER NOT NULL REFERENCES horse_tickets(id) ON DELETE CASCADE,
+  race_id TEXT NOT NULL REFERENCES races(id),
+  runner_no INTEGER NOT NULL,
+  bet_type TEXT NOT NULL CHECK (bet_type IN ('win', 'place')),
+  price_at_bet REAL,
+  result TEXT NOT NULL DEFAULT 'pending' CHECK (result IN ('pending', 'won', 'lost', 'void')),
+  dividend REAL
+);
+CREATE INDEX IF NOT EXISTS horse_parlay_legs_race ON horse_parlay_legs(race_id, result);
+
 CREATE TABLE IF NOT EXISTS meta (
   key TEXT PRIMARY KEY,
   value TEXT
@@ -142,10 +200,15 @@ function open(file) {
   const db = new DatabaseSync(file);
   db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
   db.exec(SCHEMA);
-  // Databases created before horse racing was added lack this column.
-  if (!db.prepare('PRAGMA table_info(transactions)').all().some((c) => c.name === 'horse_bet_id')) {
-    db.exec('ALTER TABLE transactions ADD COLUMN horse_bet_id INTEGER');
-  }
+  // Columns added after the first release, for databases created before them.
+  const addColumn = (table, column, type) => {
+    if (!db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === column)) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+    }
+  };
+  addColumn('transactions', 'horse_bet_id', 'INTEGER');
+  addColumn('transactions', 'horse_ticket_id', 'INTEGER');
+  addColumn('races', 'pools', 'TEXT');
 
   db.tx = (fn) => {
     db.exec('BEGIN IMMEDIATE');
@@ -165,14 +228,14 @@ function open(file) {
       .run(key, value == null ? null : String(value));
 
   // Moves money and writes the ledger entry. Must run inside db.tx().
-  db.adjustBalance = ({ userId, amount, type, betId = null, horseBetId = null, note = null, byUserId = null }) => {
+  db.adjustBalance = ({ userId, amount, type, betId = null, horseBetId = null, horseTicketId = null, note = null, byUserId = null }) => {
     const user = db.prepare('SELECT balance FROM users WHERE id = ?').get(userId);
     if (!user) throw Object.assign(new Error('User not found'), { status: 404 });
     const after = user.balance + amount;
     if (after < 0) throw Object.assign(new Error('Insufficient balance'), { status: 400 });
     db.prepare('UPDATE users SET balance = ? WHERE id = ?').run(after, userId);
-    db.prepare(`INSERT INTO transactions (user_id, amount, balance_after, type, bet_id, horse_bet_id, note, by_user_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(userId, amount, after, type, betId, horseBetId, note, byUserId);
+    db.prepare(`INSERT INTO transactions (user_id, amount, balance_after, type, bet_id, horse_bet_id, horse_ticket_id, note, by_user_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(userId, amount, after, type, betId, horseBetId, horseTicketId, note, byUserId);
     return after;
   };
 

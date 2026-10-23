@@ -13,6 +13,8 @@
 // Prices and dividends are decimal returns per 1 credit staked, stake included.
 // Only the demo provider exists so far; a Racing NRC provider plugs in with the same shape.
 
+const { POOLS, comboKey, settleTickets } = require('./tote');
+
 const round2 = (n) => Math.round(n * 100) / 100;
 
 function seeded(seed) {
@@ -77,8 +79,37 @@ function demoRace(postMs) {
     postTime: new Date(postMs).toISOString(),
     distance: DISTANCES[Math.floor(rnd() * DISTANCES.length)],
     placesPaid: placesFor(runners.filter((r) => !r.withdrawn).length),
+    pools: ['EXACTA', 'QUINELLA', 'SWINGER', 'TRIFECTA', ...(runners.filter((r) => !r.withdrawn).length >= 6 ? ['SUPERFECTA'] : [])],
     runners,
   };
+}
+
+// Demo exotic dividends: the chance of each winning combination, worked out from the final win
+// prices, less a 25% tote deduction.
+function demoExoticDividends(race, prices, order) {
+  const live = race.runners.filter((r) => !r.withdrawn).map((r) => r.number);
+  const raw = Object.fromEntries(live.map((n) => [n, (1 - TAKEOUT) / prices[n].win]));
+  const sum = Object.values(raw).reduce((a, b) => a + b, 0);
+  const p = Object.fromEntries(live.map((n) => [n, raw[n] / sum]));
+  const inOrder = (ns) => ns.reduce((acc, n, i) => acc * p[n] / (1 - ns.slice(0, i).reduce((s, m) => s + p[m], 0)), 1);
+  const pays = (prob) => Math.max(1.1, Math.round((0.75 / prob) * 10) / 10);
+  const [a, b, c, d] = order;
+  const pools = {
+    EXACTA: { [comboKey('EXACTA', [a, b])]: pays(inOrder([a, b])) },
+    QUINELLA: { [comboKey('QUINELLA', [a, b])]: pays(inOrder([a, b]) + inOrder([b, a])) },
+    TRIFECTA: { [comboKey('TRIFECTA', [a, b, c])]: pays(inOrder([a, b, c])) },
+    SWINGER: {},
+  };
+  // Omni: each pair from the first three, paid on the chance both finish in the top three.
+  for (const [x, y] of [[a, b], [a, c], [b, c]]) {
+    let prob = 0;
+    for (const z of live.filter((n) => n !== x && n !== y)) {
+      for (const ord of [[x, y, z], [x, z, y], [y, x, z], [y, z, x], [z, x, y], [z, y, x]]) prob += inOrder(ord);
+    }
+    pools.SWINGER[comboKey('SWINGER', [x, y])] = pays(prob);
+  }
+  if (race.pools.includes('SUPERFECTA') && d) pools.SUPERFECTA = { [comboKey('SUPERFECTA', [a, b, c, d])]: pays(inOrder([a, b, c, d])) };
+  return pools;
 }
 
 // Pool shares drift every couple of minutes, so prices move like a real tote market until the off.
@@ -141,6 +172,7 @@ function createDemoProvider({ now }) {
         out.push({
           id,
           abandoned: false,
+          pools: demoExoticDividends(race, prices, order.map((r) => r.number)),
           runners: race.runners.map((r) => {
             const position = r.withdrawn ? null : order.indexOf(r) + 1;
             return {
@@ -166,11 +198,11 @@ function createRacingService(db, config, { now = () => Date.now(), log = console
   function storeCards(cards) {
     const nowIso = new Date(now()).toISOString();
     const upsertRace = db.prepare(`
-      INSERT INTO races (id, meeting, race_no, name, post_time, distance, places_paid, prices_updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO races (id, meeting, race_no, name, post_time, distance, places_paid, prices_updated_at, pools)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET meeting = excluded.meeting, race_no = excluded.race_no, name = excluded.name,
         post_time = excluded.post_time, distance = excluded.distance, places_paid = excluded.places_paid,
-        prices_updated_at = excluded.prices_updated_at
+        prices_updated_at = excluded.prices_updated_at, pools = excluded.pools
       WHERE races.status = 'open'`);
     // Prices freeze at the off; a withdrawal (from the feed or the master) is never undone by the feed.
     const upsertRunner = db.prepare(`
@@ -184,7 +216,8 @@ function createRacingService(db, config, { now = () => Date.now(), log = console
         AND (SELECT post_time FROM races WHERE id = runners.race_id) > ?`);
     db.tx(() => {
       for (const c of cards) {
-        upsertRace.run(c.id, c.meeting, c.raceNo, c.name ?? null, c.postTime, c.distance ?? null, c.placesPaid ?? 3, nowIso);
+        upsertRace.run(c.id, c.meeting, c.raceNo, c.name ?? null, c.postTime, c.distance ?? null, c.placesPaid ?? 3, nowIso,
+          JSON.stringify((c.pools || []).filter((pool) => POOLS[pool])));
         for (const r of c.runners) {
           upsertRunner.run(c.id, r.number, r.horse, r.jockey ?? null, r.trainer ?? null, r.weight ?? null,
             r.draw ?? null, r.form ?? null, r.withdrawn ? null : r.winPrice ?? null,
@@ -203,7 +236,7 @@ function createRacingService(db, config, { now = () => Date.now(), log = console
           db.prepare("UPDATE races SET status = 'abandoned' WHERE id = ?").run(res.id);
           continue;
         }
-        recordResult(db, res.id, res.runners);
+        recordResult(db, res.id, res.runners, res.pools);
       }
     });
   }
@@ -227,18 +260,31 @@ function createRacingService(db, config, { now = () => Date.now(), log = console
   return { mode: provider.mode, refresh };
 }
 
-// Writes a race result. Runners missing from `runners` are treated as unplaced.
-function recordResult(db, raceId, runners) {
+// Writes a race result. Runners missing from `runners` are treated as unplaced. `pools` holds the
+// exotic dividends, e.g. { EXACTA: { '6-9': 50.9 } }; a pool left out refunds its bets.
+function recordResult(db, raceId, runners, pools = {}) {
   db.prepare('UPDATE runners SET finish_pos = NULL, win_dividend = NULL, place_dividend = NULL WHERE race_id = ?').run(raceId);
   const set = db.prepare(`UPDATE runners SET finish_pos = ?, win_dividend = ?, place_dividend = ?,
                             withdrawn = MAX(withdrawn, ?) WHERE race_id = ? AND number = ?`);
   for (const r of runners) {
     set.run(r.position ?? null, r.winDividend ?? null, r.placeDividend ?? null, r.withdrawn ? 1 : 0, raceId, r.number);
   }
+  db.prepare('DELETE FROM race_dividends WHERE race_id = ?').run(raceId);
+  db.prepare('DELETE FROM race_pool_results WHERE race_id = ?').run(raceId);
+  for (const [pool, combos] of Object.entries(pools || {})) {
+    if (!POOLS[pool] || !combos) continue;
+    db.prepare('INSERT INTO race_pool_results (race_id, pool) VALUES (?, ?)').run(raceId, pool);
+    for (const [combo, dividend] of Object.entries(combos)) {
+      if (dividend > 0) {
+        db.prepare('INSERT OR REPLACE INTO race_dividends (race_id, pool, combo, dividend) VALUES (?, ?, ?, ?)').run(raceId, pool, combo, dividend);
+      }
+    }
+  }
   db.prepare("UPDATE races SET status = 'result' WHERE id = ?").run(raceId);
 }
 
 // Settles horse bets: withdrawn runners and abandoned races are refunded, the rest pay the final dividend.
+// Also settles exotic bets and parlays.
 function settleHorseBets(db) {
   let settled = 0;
   db.tx(() => {
@@ -265,7 +311,7 @@ function settleHorseBets(db) {
       settled++;
     }
   });
-  return settled;
+  return settled + settleTickets(db);
 }
 
 module.exports = { createRacingService, createDemoProvider, settleHorseBets, recordResult, placesFor };

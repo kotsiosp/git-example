@@ -80,6 +80,14 @@ tote prices. Prices refresh every 30 seconds and freeze at the off.
   credit, stake included), which can be higher or lower than the price when the bet was placed.
 - **Place terms:** 1st–2nd for 5–7 runners, 1st–3rd for 8 or more, and no place betting below 5 runners.
 - **Each way:** one Win bet plus one Place bet of the same stake.
+- **More bets** (on each race, for the pools Racing NRC offers there): **Forecast** (1st and 2nd in order), **Twin**
+  (first two, any order), **Omni** (two horses both in the top 3), **Trio** (top 3 in order) and **Tetracast** (top 4
+  in order). They can be played **Straight** (one or more horses per place), **Reverse** (Forecast both ways),
+  **Box** (every order of the chosen horses) or with a **Banker**. Each combination costs the unit stake and pays the
+  official dividend for that pool; combinations with a withdrawn horse are refunded, as is a pool with no published
+  result.
+- **Parlay:** one horse (win or place) in each of 2 or more races; the dividends multiply. A withdrawn horse counts
+  as 1.00 and a losing leg loses the parlay.
 - **Withdrawn horse or abandoned race:** the stake is refunded.
 - **Master *Racing* page:** enter a result and its dividends by hand, withdraw a horse, or abandon a race.
 
