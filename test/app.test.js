@@ -180,11 +180,15 @@ test('live feed: stores odds and settles from scores endpoint', async () => {
   const fakeFetch = async (url) => {
     const u = new URL(url);
     assert.equal(u.searchParams.get('apiKey'), 'KEY');
+    if (u.pathname.endsWith('/events')) {
+      return new Response(JSON.stringify([{ id: 'ev1', commence_time: kickoff, home_team: 'Arsenal', away_team: 'Chelsea' }]),
+        { headers: { 'x-requests-remaining': '480', 'x-requests-last': '0' } });
+    }
     const body = u.pathname.endsWith('/odds')
       ? [{ id: 'ev1', sport_key: 'soccer_epl', sport_title: 'EPL', commence_time: kickoff, home_team: 'Arsenal', away_team: 'Chelsea',
         bookmakers: [{ key: 'b', markets: [{ key: 'h2h', outcomes: [{ name: 'Arsenal', price: 2 }, { name: 'Chelsea', price: 3.6 }, { name: 'Draw', price: 3.3 }] }] }] }]
       : [{ id: 'ev1', completed: true, home_team: 'Arsenal', away_team: 'Chelsea', scores: [{ name: 'Arsenal', score: '2' }, { name: 'Chelsea', score: '1' }] }];
-    return new Response(JSON.stringify(body), { headers: { 'x-requests-remaining': '480' } });
+    return new Response(JSON.stringify(body), { headers: { 'x-requests-remaining': '480', 'x-requests-last': '2' } });
   };
   let t = Date.parse('2026-10-24T12:00:00Z');
   const svc = createOddsService(ldb, { ...config, oddsApiKey: 'KEY', leagues: ['soccer_epl'] }, { fetchImpl: fakeFetch, now: () => t });

@@ -28,8 +28,11 @@ async function scoresTick() {
 }
 const safe = (fn) => () => fn().catch((err) => console.error(err));
 
-// Demo fixtures cost nothing, so they refresh every few minutes.
-const oddsEvery = (odds.mode === 'demo' ? 5 : config.oddsRefreshMinutes) * 60 * 1000;
+console.log(`Football results: ${{ 'football-data': 'football-data.org (free)', 'odds-api': 'The Odds API (uses credits)', manual: 'entered by the master', demo: 'DEMO' }[odds.resultsSource]}`);
+
+// Demo fixtures cost nothing, so they refresh every few minutes. Live checks are free; credits are
+// only spent when a league's prices are due.
+const oddsEvery = (odds.mode === 'demo' ? 5 : config.oddsCheckMinutes) * 60 * 1000;
 const scoresEvery = (odds.mode === 'demo' ? 5 : config.scoresRefreshMinutes) * 60 * 1000;
 safe(async () => { await oddsTick(); await scoresTick(); })();
 setInterval(safe(oddsTick), oddsEvery);

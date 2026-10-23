@@ -652,7 +652,9 @@
       <div class="card">
         <p>Odds last refreshed: <strong>${s.oddsRefreshedAt ? esc(when(s.oddsRefreshedAt)) : 'never'}</strong><br>
         Results last checked: <strong>${s.scoresRefreshedAt ? esc(when(s.scoresRefreshedAt)) : 'never'}</strong></p>
-        <p class="muted small">Leagues: ${s.leagues.map(esc).join(', ')}</p>
+        <p class="muted small">Leagues: ${s.leagues.map(esc).join(', ')}<br>
+          Results from: ${{ 'football-data': 'football-data.org (free)', 'odds-api': 'The Odds API (uses credits)', manual: 'entered by you on the Settlement page', demo: 'demo' }[s.resultsSource] || '—'}.
+          Prices refresh every 2 days for leagues playing this week, daily in the last 3 days, every 12 hours the day before and every 3 hours just before kick-off.</p>
         ${s.oddsMode === 'demo' ? '<p class="muted small">Set <code>ODDS_API_KEY</code> on the server to switch to live bookmaker odds from The Odds API.</p>' : ''}
         ${s.lastError ? `<p class="neg small">Last error: ${esc(s.lastError)}</p>` : ''}
         ${s.racingMode ? `<p>Horse racing feed: <strong>${s.racingMode === 'demo' ? 'Demo (simulated races)' : s.racingMode === 'nrc' ? 'Racing NRC (live)' : esc(s.racingMode)}</strong>,

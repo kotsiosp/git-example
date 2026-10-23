@@ -374,6 +374,7 @@ function createApp({ db, config, odds, racing, now = () => Date.now() }) {
     const count = (sql) => db.prepare(sql).get().n;
     res.json({
       oddsMode: odds.mode,
+      resultsSource: odds.resultsSource,
       leagues: config.leagues,
       oddsRefreshedAt: db.getMeta('odds_refreshed_at'),
       scoresRefreshedAt: db.getMeta('scores_refreshed_at'),
@@ -391,7 +392,7 @@ function createApp({ db, config, odds, racing, now = () => Date.now() }) {
   });
 
   admin.post('/refresh', async (req, res) => {
-    const result = await odds.refreshOdds();
+    const result = await odds.refreshOdds({ force: true });
     await odds.refreshScores();
     if (racing) await racing.refresh();
     const settledBets = settleAll(db) + settleHorseBets(db);

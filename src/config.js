@@ -26,10 +26,21 @@ module.exports = {
   oddsRegions: process.env.ODDS_REGIONS || 'eu',
   // Empty = average of all bookmakers; otherwise use this bookmaker key (e.g. pinnacle).
   oddsBookmaker: process.env.ODDS_BOOKMAKER || '',
-  leagues: list(process.env.LEAGUES,
-    'soccer_epl,soccer_spain_la_liga,soccer_italy_serie_a,soccer_germany_bundesliga,soccer_france_ligue_one,soccer_uefa_champs_league'),
-  oddsRefreshMinutes: Number(process.env.ODDS_REFRESH_MINUTES || 60),
+  oddsMarkets: process.env.ODDS_MARKETS || 'h2h,totals', // each market costs 1 credit per refresh
+  // Four leagues fit The Odds API's free plan (500 credits a month) with the schedule below.
+  leagues: list(process.env.LEAGUES, 'soccer_epl,soccer_spain_la_liga,soccer_italy_serie_a,soccer_uefa_champs_league'),
+  // How often to check whether a league's prices are due (checks are free). Prices are refreshed
+  // daily when a league plays within a week, every 8h on the day before, every 2h in the last 3h.
+  oddsCheckMinutes: Number(process.env.ODDS_CHECK_MINUTES || 60),
+  oddsFallbackHours: Number(process.env.ODDS_FALLBACK_HOURS || 12), // used if the fixture list ever costs credits
+  oddsReserveCredits: Number(process.env.ODDS_RESERVE_CREDITS || 20),
   scoresRefreshMinutes: Number(process.env.SCORES_REFRESH_MINUTES || 30),
+
+  // Free automatic results from football-data.org (https://www.football-data.org). Without a key the
+  // master enters scores on the Settlement page, unless ODDS_API_SCORES=true (costs 2 credits per check).
+  footballDataKey: process.env.FOOTBALL_DATA_KEY || '',
+  oddsApiScores: process.env.ODDS_API_SCORES === 'true',
+  footballDataBase: process.env.FOOTBALL_DATA_BASE || 'https://api.football-data.org/v4',
 
   // Cyprus horse racing: 'nrc' reads Racing NRC (racingnrc.com.cy); 'demo' simulates races.
   racingEnabled: process.env.RACING_ENABLED !== 'false',

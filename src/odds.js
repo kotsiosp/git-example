@@ -2,6 +2,9 @@
 
 // Pulls fixtures, odds and results from The Odds API (https://the-odds-api.com),
 // or generates realistic demo fixtures when no API key is configured.
+// Results come from football-data.org instead when a key for it is set (free, saves odds credits).
+
+const { createFootballDataClient, findMatch, finalScore } = require('./footballData');
 
 const TOTALS_LINE = 2.5;
 
@@ -93,11 +96,13 @@ function createLiveProvider(config, fetchImpl = fetch) {
     for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
     const res = await fetchImpl(url);
     const remaining = res.headers.get('x-requests-remaining');
+    // What this request cost, in credits.
+    const cost = res.headers.get('x-requests-last');
     if (!res.ok) {
       const body = await res.text().catch(() => '');
       throw new Error(`Odds API ${path} failed: ${res.status} ${body.slice(0, 200)}`);
     }
-    return { data: await res.json(), remaining };
+    return { data: await res.json(), remaining, cost: cost == null ? null : Number(cost) };
   }
 
   return {
@@ -105,10 +110,14 @@ function createLiveProvider(config, fetchImpl = fetch) {
     async fetchOdds(sportKey) {
       return get(`/sports/${sportKey}/odds`, {
         regions: config.oddsRegions,
-        markets: 'h2h,totals',
+        markets: config.oddsMarkets,
         oddsFormat: 'decimal',
         dateFormat: 'iso',
       });
+    },
+    // The fixture list, without prices. It is free on The Odds API, which the service double-checks.
+    async fetchEvents(sportKey) {
+      return get(`/sports/${sportKey}/events`, { dateFormat: 'iso' });
     },
     async fetchScores(sportKey) {
       return get(`/sports/${sportKey}/scores`, { daysFrom: 3, dateFormat: 'iso' });
@@ -188,15 +197,58 @@ function demoFixtures(sportKey, now = Date.now()) {
 
 function createOddsService(db, config, { fetchImpl, now = () => Date.now(), log = console } = {}) {
   const provider = config.oddsApiKey ? createLiveProvider(config, fetchImpl) : null;
+  const results = config.footballDataKey ? createFootballDataClient(config, fetchImpl) : null;
   const mode = provider ? 'live' : 'demo';
+  const HOUR = 3600 * 1000;
 
-  async function refreshOdds() {
+  // How old a league's prices may get, given its next kick-off: fresher as the match nears,
+  // and no spending at all on a league with nothing in the next week.
+  function maxAgeFor(nextKickoff) {
+    const until = nextKickoff - now();
+    if (until <= 3 * HOUR) return 3 * HOUR;
+    if (until <= 24 * HOUR) return 12 * HOUR;
+    if (until <= 3 * 24 * HOUR) return 24 * HOUR;
+    if (until <= 7 * 24 * HOUR) return 48 * HOUR;
+    return null;
+  }
+
+  // Decides whether this league's prices are worth spending credits on right now.
+  async function oddsDue(sportKey, force) {
+    if (force) return true;
+    let nextKickoff = null;
+    let maxAge = config.oddsFallbackHours * HOUR;
+    if (db.getMeta('odds_events_cost_credits') !== 'true') {
+      const { data, remaining, cost } = await provider.fetchEvents(sportKey);
+      if (remaining != null) db.setMeta('odds_api_remaining', remaining);
+      if (cost > 0) {
+        // The fixture list is not free after all: stop using it and refresh on a fixed timer instead.
+        db.setMeta('odds_events_cost_credits', 'true');
+        log.error(`[odds] the fixture list cost ${cost} credit(s); switching to a refresh every ${config.oddsFallbackHours}h`);
+      } else {
+        const upcoming = data.map((e) => Date.parse(e.commence_time)).filter((t) => t > now());
+        nextKickoff = upcoming.length ? Math.min(...upcoming) : null;
+        maxAge = nextKickoff ? maxAgeFor(nextKickoff) : null;
+      }
+    }
+    if (maxAge == null) return false;
+    const last = db.getMeta(`odds_refreshed_at:${sportKey}`);
+    if (last && now() - Date.parse(last) < maxAge) return false;
+    // Keep a small reserve of credits for the last refresh before kick-off.
+    const remaining = db.getMeta('odds_api_remaining');
+    const soon = nextKickoff && nextKickoff - now() <= 3 * HOUR;
+    if (remaining != null && Number(remaining) < config.oddsReserveCredits && !soon) return false;
+    return true;
+  }
+
+  async function refreshOdds({ force = false } = {}) {
     const errors = [];
     for (const sportKey of config.leagues) {
       try {
         if (provider) {
+          if (!await oddsDue(sportKey, force)) continue;
           const { data, remaining } = await provider.fetchOdds(sportKey);
           if (remaining != null) db.setMeta('odds_api_remaining', remaining);
+          db.setMeta(`odds_refreshed_at:${sportKey}`, new Date(now()).toISOString());
           db.tx(() => {
             for (const ev of data) {
               storeEvent(db, { ...ev, sport_title: LEAGUE_TITLES[ev.sport_key] || ev.sport_title },
@@ -230,7 +282,12 @@ function createOddsService(db, config, { fetchImpl, now = () => Date.now(), log 
       .all(new Date(now()).toISOString()).map((r) => r.sport_key);
     for (const sportKey of leagues) {
       try {
-        if (provider) {
+        if (results?.covers(sportKey)) {
+          await settleFromFootballData(sportKey);
+        } else if (provider && !config.oddsApiScores) {
+          // No free results source for this league: the master enters the score on the Settlement page.
+          continue;
+        } else if (provider) {
           const { data, remaining } = await provider.fetchScores(sportKey);
           if (remaining != null) db.setMeta('odds_api_remaining', remaining);
           db.tx(() => {
@@ -266,7 +323,29 @@ function createOddsService(db, config, { fetchImpl, now = () => Date.now(), log 
     db.setMeta('scores_refreshed_at', new Date(now()).toISOString());
   }
 
-  return { mode, refreshOdds, refreshScores };
+  // Results from football-data.org, matched to our events by kick-off time and club names.
+  // A match it can't pair up stays on the master's Settlement page.
+  async function settleFromFootballData(sportKey) {
+    const pending = db.prepare(`
+      SELECT DISTINCT e.* FROM events e JOIN bet_legs l ON l.event_id = e.id
+      WHERE e.sport_key = ? AND l.result = 'pending' AND e.completed = 0 AND e.voided = 0 AND e.commence_time <= ?`)
+      .all(sportKey, new Date(now()).toISOString());
+    if (!pending.length) return;
+    const day = (ms) => new Date(ms).toISOString().slice(0, 10);
+    // The free plan allows a window of about ten days; older matches are left to the master.
+    const earliest = Math.max(Math.min(...pending.map((e) => Date.parse(e.commence_time))), now() - 9 * 24 * HOUR);
+    const matches = await results.matches(sportKey, day(earliest - 24 * HOUR), day(now()));
+    db.tx(() => {
+      for (const ev of pending) {
+        const m = findMatch(ev, matches);
+        const score = m && finalScore(m);
+        if (score) recordResult(db, ev.id, score[0], score[1]);
+      }
+    });
+  }
+
+  const resultsSource = results ? 'football-data' : !provider ? 'demo' : config.oddsApiScores ? 'odds-api' : 'manual';
+  return { mode, resultsSource, refreshOdds, refreshScores };
 }
 
 module.exports = { createOddsService, consensusOdds, demoFixtures, LEAGUE_TITLES, TOTALS_LINE };
