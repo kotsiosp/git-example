@@ -1,0 +1,5 @@
+# DOMAIN comes from .env. For a bought domain with www, set e.g. DOMAIN="example.com, www.example.com".
+{$DOMAIN} {
+	encode gzip
+	reverse_proxy app:3000
+}
