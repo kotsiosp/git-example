@@ -35,23 +35,19 @@ ADMIN_PASSWORD=secret123 npm start      # http://localhost:3000, log in as admin
 npm test
 ```
 
-## Put it on your own domain
+## Put it online
 
-1. **Buy a domain** from any registrar (Namecheap, Cloudflare, Porkbun, GoDaddy…).
-2. **Rent a small Linux server** (Hetzner, DigitalOcean, Linode…; about $5/month, 1 GB RAM is plenty) and
-   [install Docker](https://docs.docker.com/engine/install/).
-3. In the registrar's DNS settings, add an **A record** for `@` (and one for `www`) pointing at the server's IP address.
-4. On the server:
-   ```bash
-   git clone <this repo> playbet && cd playbet
-   cp .env.example .env
-   nano .env            # set DOMAIN, ADMIN_PASSWORD and ODDS_API_KEY
-   docker compose up -d --build
-   ```
-   Caddy gets a free HTTPS certificate automatically. Open `https://yourdomain.com` and log in as the master.
+**Step-by-step guide for a rented Ubuntu server (e.g. servers.guru): [docs/SERVER-SETUP.md](docs/SERVER-SETUP.md).**
+`scripts/setup-server.sh` installs Docker, a firewall and automatic security updates, starts the site behind Caddy
+(automatic HTTPS), and switches on two timers:
 
-To update later: `git pull && docker compose up -d --build`. All data is kept in the `playbet-data` Docker volume
-(back it up with `docker compose cp app:/app/data ./backup`).
+- **`playbet-update.timer`** checks GitHub every 5 minutes and rebuilds the site when there is new code
+  (`scripts/update.sh`). A version that fails to build is not installed, and the old one keeps running.
+- **`playbet-backup.timer`** copies the database every night at 03:30 to `/opt/playbet-backups`, keeping 14 days
+  (`scripts/backup.sh`).
+
+The site works without buying a domain: a free name from duckdns.org (or `<ip-with-dashes>.sslip.io`) gets a real
+HTTPS certificate too.
 
 ## Live odds and API costs
 
